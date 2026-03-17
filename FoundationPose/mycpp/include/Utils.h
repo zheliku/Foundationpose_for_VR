@@ -10,8 +10,6 @@
 
 #pragma once
 
-#define _USE_MATH_DEFINES // 添加这一行
-
 // STL
 #include <iostream>
 #include <string>
@@ -29,12 +27,7 @@
 #include <Eigen/Geometry>
 #include <string>
 #include <limits.h>
-#ifdef _WIN32
-    #define NOMINMAX // 添加这一行
-    #include <windows.h> // 包含 Windows 特定的头文件
-#else
-    #include <unistd.h>  // 包含 POSIX 特定的头文件
-#endif
+#include <unistd.h>
 #include <memory>
 #include <math.h>
 #include <boost/format.hpp>

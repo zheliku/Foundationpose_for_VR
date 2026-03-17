@@ -61,16 +61,20 @@ xatlas = ">=0.0.11, <0.0.12"
 [target.win-64.pypi-dependencies]
 triton-windows = ">=3.6.0.post26, <4"
 
+[target.win-64.dependencies]
+c-compiler = ">=1.11,<2"
+cxx-compiler = ">=1.11,<2"
+
+[target.linux-64.dependencies]
+gcc_linux-64 = "11.*"
+gxx_linux-64 = "11.*"
 
 [tasks]
 # 克隆并编译 FoundationPose 的 C++ 扩展
 _build_fp = { cmd = """
-rm -rf FoundationPose &&
-git clone https://gitcode.com/gh_mirrors/fo/FoundationPose.git &&
-mkdir -p FoundationPose/mycpp/build &&
-cd FoundationPose/mycpp/build &&
-cmake .. &&
-cmake --build . --config Release
+cmake -E rm -rf FoundationPose/mycpp/build &&
+cmake -S FoundationPose/mycpp -B FoundationPose/mycpp/build --fresh -G Ninja -DCMAKE_BUILD_TYPE=Release &&
+cmake --build FoundationPose/mycpp/build --parallel
 """ }
 # 安装 Cutie 包，去掉对 cchardet 的依赖
 _build_ct = { cmd = """
@@ -84,11 +88,11 @@ build_sam3 = { cmd = """
 rm -rf sam3 &&
 git clone https://gitcode.com/gh_mirrors/sam/sam3.git &&
 """ }
-build = { depends-on = ["_build_fp", "_build_ct"] }
+build = { depends-on = ["_build_fp"] }
 
 fp_demo = { cmd = """
 python FoundationPose/run_demo.py \
---debug 3
+--debug 2
 """ }
 
 off_demo = { args = [
@@ -204,4 +208,3 @@ python src/origin_obj_track_realtime.py \
 --class_name              {{TESTCASE}}
 --yolo_model_path         yolo_model/best.pt
 """
-

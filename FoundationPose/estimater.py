@@ -13,7 +13,6 @@ import itertools
 from learning.training.predict_score import *
 from learning.training.predict_pose_refine import *
 import yaml
-import tempfile
 
 
 class FoundationPose:
@@ -67,8 +66,7 @@ class FoundationPose:
     self.mesh_path = None
     self.mesh = mesh
     if self.mesh is not None:
-      temp_dir = tempfile.gettempdir()
-      self.mesh_path = os.path.join(temp_dir, f'{uuid.uuid4()}.obj')
+      self.mesh_path = f'/tmp/{uuid.uuid4()}.obj'
       self.mesh.export(self.mesh_path)
     self.mesh_tensors = make_mesh_tensors(self.mesh)
 
@@ -268,4 +266,5 @@ class FoundationPose:
       extra['vis'] = vis
     self.pose_last = pose
     return (pose@self.get_tf_to_centered_mesh()).data.cpu().numpy().reshape(4,4)
+
 
