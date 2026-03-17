@@ -1,0 +1,20 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+Cutie/weights/
+FoundationPose/demo_data/
+FoundationPose/weights/
+sam3/assets/sam3_ckpt/
+# samples/
+data/online/*/output
