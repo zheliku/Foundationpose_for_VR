@@ -16,7 +16,7 @@ from zmq_utils import RGBDSender
 
 # ==================== 配置 ====================
 SERVER_IP = "172.24.244.81"  # 服务器 IP 地址
-# SERVER_IP = "127.0.0.1"  # 服务器 IP 地址
+SERVER_IP = "127.0.0.1"  # 服务器 IP 地址
 SERVER_PORT = 5555  # 服务器接收端口
 JPEG_QUALITY = 80  # JPEG 压缩质量 (1-100)
 STATS_INTERVAL = 60  # 每隔多少帧打印统计信息
