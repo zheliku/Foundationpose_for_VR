@@ -33,6 +33,22 @@ from .pose import PosePublisher, PoseSubscriber
 # 追踪数据传输
 from .tracking import TrackingPublisher, TrackingSubscriber
 
+# 通用 payload 接收与解析
+from .payload import (
+    RGBDPayloadEncoder,
+    RGBDPayloadParser,
+    IntParser,
+    MultipartReceiver,
+    MultipartSender,
+    PayloadParser,
+    PayloadEncoder,
+    StereoJpegParser,
+    TopicMultipartPublisher,
+    TrackingPayloadEncoder,
+    TrackingPayloadParser,
+    Utf8TextParser,
+)
+
 # 网络延迟测量
 from .latency import LatencyProbe, measure_network_latency
 
@@ -64,6 +80,19 @@ __all__ = [
     # Tracking
     "TrackingPublisher",
     "TrackingSubscriber",
+    # Payload
+    "MultipartSender",
+    "MultipartReceiver",
+    "TopicMultipartPublisher",
+    "PayloadEncoder",
+    "PayloadParser",
+    "StereoJpegParser",
+    "RGBDPayloadEncoder",
+    "RGBDPayloadParser",
+    "TrackingPayloadEncoder",
+    "TrackingPayloadParser",
+    "Utf8TextParser",
+    "IntParser",
     # 网络延迟
     "LatencyProbe",
     "measure_network_latency",

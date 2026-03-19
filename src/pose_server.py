@@ -13,10 +13,19 @@
 """
 
 import numpy as np
+import time
 from pathlib import Path
 
 from pose_tracker_api import PoseTracker
-from zmq_utils import LatencyProbe, LatencyTracker, RGBDReceiver, TrackingPublisher
+from zmq_utils import (
+    LatencyProbe,
+    LatencyStats,
+    LatencyTracker,
+    MultipartReceiver,
+    RGBDPayloadParser,
+    TopicMultipartPublisher,
+    TrackingPayloadEncoder,
+)
 
 # 获取脚本所在目录的绝对路径
 SCRIPT_DIR = Path(__file__).parent.resolve()
@@ -53,8 +62,15 @@ DEBUG_OUTPUT_DIR = str(SCRIPT_DIR / "../data/debug")  # 调试输出目录
 
 def main() -> None:
     # 初始化接收器和发布器
-    receiver = RGBDReceiver(f"tcp://*:{RECEIVE_PORT}", hwm=2, bind=True)
-    publisher = TrackingPublisher(f"tcp://*:{PUBLISH_PORT}", hwm=1, bind=True)
+    receiver = MultipartReceiver(f"tcp://*:{RECEIVE_PORT}", hwm=2, bind=True)
+    rgbd_parser = RGBDPayloadParser()
+    publisher = TopicMultipartPublisher(f"tcp://*:{PUBLISH_PORT}", hwm=1, bind=True)
+    tracking_encoder = TrackingPayloadEncoder()
+
+    # 帧率统计
+    start_time = time.perf_counter()
+    last_recv_time = 0.0
+    interval_stats = LatencyStats(window_size=100)
 
     # 启动网络延迟探测服务（后台运行）
     latency_probe = LatencyProbe.create_server(f"tcp://*:{LATENCY_PORT}")
@@ -87,9 +103,18 @@ def main() -> None:
     try:
         while True:
             # 接收 RGBD 图像
-            result = receiver.recv_rgbd(timeout_ms=100)
+            parts = receiver.recv_payload(timeout_ms=100)
+            if parts is None:
+                continue
+
+            result = rgbd_parser.parse(parts)
             if result is None:
                 continue
+
+            now = time.perf_counter()
+            if last_recv_time > 0:
+                interval_stats.record((now - last_recv_time) * 1000.0)
+            last_recv_time = now
 
             color, depth = result
 
@@ -102,35 +127,42 @@ def main() -> None:
                 tracking_result = pose_tracker.process_frame(color, depth_m)
             # ====================
 
-            # 转发给 Unity
-            if publisher.publish_tracking(
-                TRACKING_TOPIC,
+            payload = tracking_encoder.encode(
                 phase=tracking_result.phase.value,
                 color=tracking_result.color,
                 pose_matrix=tracking_result.pose_matrix,
                 quality=80,
+            )
+
+            # 转发给 Unity
+            if payload is not None and publisher.publish_payload(
+                TRACKING_TOPIC, payload
             ):
                 frame_count += 1
                 if frame_count % STATS_INTERVAL == 0:
-                    stats = receiver.get_stats()
+                    elapsed = max(now - start_time, 1e-6)
+                    fps = frame_count / elapsed
+                    stats = interval_stats.get_stats()
                     model_stats = tracker.model_stats.get_stats()
                     phase_str = "TRACKING" if pose_tracker.is_tracking else "DETECTING"
                     print(
                         f"[Server] Frames: {frame_count} | "
                         f"Phase: {phase_str} | "
-                        f"FPS: {stats['fps']:.1f} | "
-                        f"Interval: {stats['interval_avg_ms']:.1f}ms (±{stats['interval_std_ms']:.1f}) | "
+                        f"FPS: {fps:.1f} | "
+                        f"Interval: {stats['avg']:.1f}ms (±{stats['std']:.1f}) | "
                         f"Model: {model_stats['avg']:.1f}ms"
                     )
 
     except KeyboardInterrupt:
         print("\n[Server] Stopping...")
-        stats = receiver.get_stats()
+        elapsed = max(time.perf_counter() - start_time, 1e-6)
+        fps = frame_count / elapsed
+        stats = interval_stats.get_stats()
         model_stats = tracker.model_stats.get_stats()
         print("\n=== Final Statistics ===")
-        print(f"Total Frames: {int(stats['frame_count'])}")
-        print(f"Average FPS: {stats['fps']:.1f}")
-        print(f"Avg Frame Interval: {stats['interval_avg_ms']:.1f}ms")
+        print(f"Total Frames: {frame_count}")
+        print(f"Average FPS: {fps:.1f}")
+        print(f"Avg Frame Interval: {stats['avg']:.1f}ms")
         print(f"Avg Model Time: {model_stats['avg']:.1f}ms")
     finally:
         latency_probe.stop()

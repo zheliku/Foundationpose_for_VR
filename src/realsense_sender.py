@@ -9,13 +9,16 @@ RealSense RGBD 图像采集发送端
 按 Ctrl+C 停止
 """
 
-import numpy as np
-import pyrealsense2 as rs
+from typing import Any, cast
 
-from zmq_utils import RGBDSender
+import numpy as np
+import pyrealsense2 as _rs
+
+from zmq_utils import MultipartSender, RGBDPayloadEncoder
+
+rs = cast(Any, _rs)
 
 # ==================== 配置 ====================
-SERVER_IP = "172.24.244.81"  # 服务器 IP 地址
 SERVER_IP = "127.0.0.1"  # 服务器 IP 地址
 SERVER_PORT = 5555  # 服务器接收端口
 JPEG_QUALITY = 80  # JPEG 压缩质量 (1-100)
@@ -49,7 +52,8 @@ def main() -> None:
     print("[RealSense] Depth alignment to color frame: ENABLED")
 
     # 连接到服务器（HWM=1 减少积压延迟）
-    sender = RGBDSender(f"tcp://{SERVER_IP}:{SERVER_PORT}", hwm=1, bind=False)
+    sender = MultipartSender(f"tcp://{SERVER_IP}:{SERVER_PORT}", hwm=1, bind=False)
+    encoder = RGBDPayloadEncoder()
 
     frame_count = 0
     try:
@@ -69,8 +73,8 @@ def main() -> None:
             color_image = np.asanyarray(color_frame.get_data())
             depth_image = np.asanyarray(depth_frame.get_data())
 
-            # 发送 RGBD 图像
-            if sender.send_rgbd(color_image, depth_image, quality=JPEG_QUALITY):
+            payload = encoder.encode(color_image, depth_image, quality=JPEG_QUALITY)
+            if payload is not None and sender.send_payload(payload):
                 frame_count += 1
                 if frame_count % STATS_INTERVAL == 0:
                     print(f"[RealSense] Sent {frame_count} RGBD frames")
