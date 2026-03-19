@@ -73,7 +73,9 @@ def main() -> None:
             color_image = np.asanyarray(color_frame.get_data())
             depth_image = np.asanyarray(depth_frame.get_data())
 
-            payload = encoder.encode(color_image, depth_image, quality=JPEG_QUALITY)
+            payload = encoder.encode_payload(
+                color_image, depth_image, quality=JPEG_QUALITY
+            )
             if payload is not None and sender.send_payload(payload):
                 frame_count += 1
                 if frame_count % STATS_INTERVAL == 0:

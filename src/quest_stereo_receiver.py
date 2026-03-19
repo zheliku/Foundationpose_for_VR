@@ -17,7 +17,7 @@ import time
 import cv2
 import numpy as np
 
-from zmq_utils import MultipartReceiver, StereoJpegParser
+from zmq_utils import MultipartReceiver, StereoJpegDecoder
 
 
 # ==================== 配置 ====================
@@ -29,7 +29,7 @@ WINDOW_NAME = "Quest3 Stereo (Left | Right)"
 # ==============================================
 def main() -> None:
     receiver = MultipartReceiver(f"tcp://*:{LISTEN_PORT}", hwm=1, bind=True)
-    parser = StereoJpegParser()
+    decoder = StereoJpegDecoder()
 
     print(f"[StereoReceiver] Listening on tcp://*:{LISTEN_PORT}")
     print("[StereoReceiver] Press 'q' or ESC to exit")
@@ -43,7 +43,7 @@ def main() -> None:
             if parts is None:
                 continue
 
-            parsed = parser.parse(parts)
+            parsed = decoder.decode(parts)
             if parsed is None:
                 continue
 

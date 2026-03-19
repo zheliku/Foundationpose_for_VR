@@ -22,8 +22,9 @@ from zmq_utils import (
     LatencyStats,
     LatencyTracker,
     MultipartReceiver,
-    RGBDPayloadParser,
-    TopicMultipartPublisher,
+    RGBDDecoder,
+    TopicPayloadSender,
+    TrackingDecoder,
     TrackingPayloadEncoder,
 )
 
@@ -63,9 +64,10 @@ DEBUG_OUTPUT_DIR = str(SCRIPT_DIR / "../data/debug")  # 调试输出目录
 def main() -> None:
     # 初始化接收器和发布器
     receiver = MultipartReceiver(f"tcp://*:{RECEIVE_PORT}", hwm=2, bind=True)
-    rgbd_parser = RGBDPayloadParser()
-    publisher = TopicMultipartPublisher(f"tcp://*:{PUBLISH_PORT}", hwm=1, bind=True)
+    rgbd_decoder = RGBDDecoder()
+    publisher = TopicPayloadSender(f"tcp://*:{PUBLISH_PORT}", hwm=1, bind=True)
     tracking_encoder = TrackingPayloadEncoder()
+    tracking_decoder = TrackingDecoder()
 
     # 帧率统计
     start_time = time.perf_counter()
@@ -107,7 +109,7 @@ def main() -> None:
             if parts is None:
                 continue
 
-            result = rgbd_parser.parse(parts)
+            result = rgbd_decoder.decode(parts)
             if result is None:
                 continue
 
@@ -127,7 +129,7 @@ def main() -> None:
                 tracking_result = pose_tracker.process_frame(color, depth_m)
             # ====================
 
-            payload = tracking_encoder.encode(
+            payload = tracking_encoder.encode_payload(
                 phase=tracking_result.phase.value,
                 color=tracking_result.color,
                 pose_matrix=tracking_result.pose_matrix,
@@ -135,9 +137,13 @@ def main() -> None:
             )
 
             # 转发给 Unity
-            if payload is not None and publisher.publish_payload(
-                TRACKING_TOPIC, payload
-            ):
+            if payload is None:
+                continue
+
+            if tracking_decoder.decode(payload) is None:
+                continue
+
+            if publisher.send_payload(TRACKING_TOPIC, payload):
                 frame_count += 1
                 if frame_count % STATS_INTERVAL == 0:
                     elapsed = max(now - start_time, 1e-6)
