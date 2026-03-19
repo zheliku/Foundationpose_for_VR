@@ -10,6 +10,15 @@
     uv run python relay_server.py
 
 按 Ctrl+C 停止
+
+架构定位：
+- 当前主链路核心中枢（接收 RGBD -> FoundationPose -> 发布 tracking）。
+- 也是后续“Quest 双目 + 深度估计”接入 FoundationPose 的目标承载点。
+
+分层职责：
+- communicate 层：PayloadReceiver / PayloadSender 负责网络收发。
+- payload 层：RGBDDecoder / TrackingEncoder 负责协议编解码。
+- 业务层：PoseTracker 负责检测与追踪推理。
 """
 
 import numpy as np
@@ -21,11 +30,11 @@ from zmq_utils import (
     LatencyProbe,
     LatencyStats,
     LatencyTracker,
-    MultipartReceiver,
+    PayloadReceiver,
+    PayloadSender,
     RGBDDecoder,
-    TopicPayloadSender,
     TrackingDecoder,
-    TrackingPayloadEncoder,
+    TrackingEncoder,
 )
 
 # 获取脚本所在目录的绝对路径
@@ -62,11 +71,14 @@ DEBUG_OUTPUT_DIR = str(SCRIPT_DIR / "../data/debug")  # 调试输出目录
 
 
 def main() -> None:
+    """服务主循环：收包解码 -> 推理 -> 编码发布 -> 打印统计。"""
     # 初始化接收器和发布器
-    receiver = MultipartReceiver(f"tcp://*:{RECEIVE_PORT}", hwm=2, bind=True)
+    receiver = PayloadReceiver(f"tcp://*:{RECEIVE_PORT}", hwm=2, bind=True)
     rgbd_decoder = RGBDDecoder()
-    publisher = TopicPayloadSender(f"tcp://*:{PUBLISH_PORT}", hwm=1, bind=True)
-    tracking_encoder = TrackingPayloadEncoder()
+    publisher = PayloadSender(
+        f"tcp://*:{PUBLISH_PORT}", hwm=1, bind=True, send_topic=True
+    )
+    tracking_encoder = TrackingEncoder()
     tracking_decoder = TrackingDecoder()
 
     # 帧率统计
@@ -129,7 +141,7 @@ def main() -> None:
                 tracking_result = pose_tracker.process_frame(color, depth_m)
             # ====================
 
-            payload = tracking_encoder.encode_payload(
+            payload = tracking_encoder.encode(
                 phase=tracking_result.phase.value,
                 color=tracking_result.color,
                 pose_matrix=tracking_result.pose_matrix,
@@ -143,7 +155,7 @@ def main() -> None:
             if tracking_decoder.decode(payload) is None:
                 continue
 
-            if publisher.send_payload(TRACKING_TOPIC, payload):
+            if publisher.send_payload(payload, topic=TRACKING_TOPIC):
                 frame_count += 1
                 if frame_count % STATS_INTERVAL == 0:
                     elapsed = max(now - start_time, 1e-6)

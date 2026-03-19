@@ -1,27 +1,24 @@
-"""payload 收发与编解码模块"""
+"""业务协议编解码层导出。
 
-from .sender import MultipartSender, TopicPayloadSender
-from .receiver import MultipartReceiver
-from .encoder import RGBDPayloadEncoder, TrackingPayloadEncoder
+本包负责“业务对象 <-> payload(bytes[])”转换，不负责网络传输。
+建议与 zmq_utils.communicate 配套使用。
+"""
+
+from .encoder import RGBDEncoder, TrackingEncoder
 from .decoder import (
     PayloadDecoder,
     StereoJpegDecoder,
     RGBDDecoder,
     TrackingDecoder,
     Utf8TextDecoder,
-    IntDecoder,
 )
 
 __all__ = [
-    "MultipartSender",
-    "TopicPayloadSender",
-    "MultipartReceiver",
-    "RGBDPayloadEncoder",
-    "TrackingPayloadEncoder",
+    "RGBDEncoder",
+    "TrackingEncoder",
     "PayloadDecoder",
     "StereoJpegDecoder",
     "RGBDDecoder",
     "TrackingDecoder",
     "Utf8TextDecoder",
-    "IntDecoder",
 ]

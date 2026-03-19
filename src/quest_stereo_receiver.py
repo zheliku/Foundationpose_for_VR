@@ -8,6 +8,11 @@ Quest3 双目图像接收与显示
 
 运行：
     uv run python quest_stereo_receiver.py
+
+在当前系统中的角色：
+- 这是 Quest 双目链路的“下游验证节点”。
+- 用于确认 Unity 发送端的双目 payload 已正确传输和解码。
+- 当前阶段仅做图像传输与显示，不涉及深度估计与 FoundationPose 推理。
 """
 
 from __future__ import annotations
@@ -17,7 +22,7 @@ import time
 import cv2
 import numpy as np
 
-from zmq_utils import MultipartReceiver, StereoJpegDecoder
+from zmq_utils import PayloadReceiver, StereoJpegDecoder
 
 
 # ==================== 配置 ====================
@@ -28,7 +33,8 @@ WINDOW_NAME = "Quest3 Stereo (Left | Right)"
 
 # ==============================================
 def main() -> None:
-    receiver = MultipartReceiver(f"tcp://*:{LISTEN_PORT}", hwm=1, bind=True)
+    """主循环：收包 -> 双目解码 -> 拼接显示 -> 统计。"""
+    receiver = PayloadReceiver(f"tcp://*:{LISTEN_PORT}", hwm=1, bind=True)
     decoder = StereoJpegDecoder()
 
     print(f"[StereoReceiver] Listening on tcp://*:{LISTEN_PORT}")

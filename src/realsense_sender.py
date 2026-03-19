@@ -3,6 +3,15 @@ RealSense RGBD 图像采集发送端
 
 运行在连接 RealSense 相机的电脑上，采集彩色图像和深度图像并发送到服务器。
 
+在当前系统中的角色：
+- 这是“旧主链路”的上游数据源。
+- 输出协议为 RGBD payload: [color_jpg, depth_png]。
+- 下游通常是 pose_server.py（FoundationPose 推理）。
+
+与新链路关系：
+- 新目标链路会逐步转向 Quest 双目输入。
+- 该脚本仍可作为稳定基线与回归测试输入源。
+
 使用方法：
     uv run python realsense_sender.py
 
@@ -14,7 +23,7 @@ from typing import Any, cast
 import numpy as np
 import pyrealsense2 as _rs
 
-from zmq_utils import MultipartSender, RGBDPayloadEncoder
+from zmq_utils import PayloadSender, RGBDEncoder
 
 rs = cast(Any, _rs)
 
@@ -32,6 +41,7 @@ CAMERA_FPS = 30  # 改为 30 FPS（与参考脚本一致，减少不必要的帧
 
 
 def main() -> None:
+    """主循环：采集 -> 对齐 -> 编码 -> 发送。"""
     # 初始化 RealSense
     pipeline = rs.pipeline()
     config = rs.config()
@@ -52,8 +62,8 @@ def main() -> None:
     print("[RealSense] Depth alignment to color frame: ENABLED")
 
     # 连接到服务器（HWM=1 减少积压延迟）
-    sender = MultipartSender(f"tcp://{SERVER_IP}:{SERVER_PORT}", hwm=1, bind=False)
-    encoder = RGBDPayloadEncoder()
+    sender = PayloadSender(f"tcp://{SERVER_IP}:{SERVER_PORT}", hwm=1, bind=False)
+    encoder = RGBDEncoder()
 
     frame_count = 0
     try:
@@ -73,9 +83,7 @@ def main() -> None:
             color_image = np.asanyarray(color_frame.get_data())
             depth_image = np.asanyarray(depth_frame.get_data())
 
-            payload = encoder.encode_payload(
-                color_image, depth_image, quality=JPEG_QUALITY
-            )
+            payload = encoder.encode(color_image, depth_image, quality=JPEG_QUALITY)
             if payload is not None and sender.send_payload(payload):
                 frame_count += 1
                 if frame_count % STATS_INTERVAL == 0:

@@ -1,96 +1,55 @@
 """
 ZMQ 工具包
 
-提供基于 ZeroMQ 的图像和数据传输工具。
+提供基于 ZeroMQ 的 payload 收发、编解码与延迟测量工具。
 
 模块结构：
-- base: 基础节点类 (BaseNode, PushNode, PullNode, PubNode, SubNode)
+- communicate: 通用 payload 收发 (PayloadSender, PayloadReceiver)
+- payload: 通用 payload 编解码
 - timing: 计时工具 (LatencyStats, Timer, LatencyTracker)
-- image: 图像传输 (ImageSender, ImageReceiver, etc.)
-- rgbd: RGBD 传输 (RGBDSender, RGBDReceiver, etc.)
-- pose: 位姿/JSON 数据 (PosePublisher, PoseSubscriber)
 - latency: 网络延迟测量 (LatencyProbe)
 
 使用示例：
-    from zmq_utils import RGBDSender, RGBDReceiver, LatencyProbe
+    from zmq_utils import PayloadSender, PayloadReceiver, RGBDEncoder, LatencyProbe
 """
 
-# 基础节点
-from .base import BaseNode, PubNode, PullNode, PushNode, SubNode
+# 通用 payload 收发
+from .communicate import PayloadReceiver, PayloadSender
+
+# 通用 payload 编解码
+from .payload import (
+    PayloadDecoder,
+    RGBDDecoder,
+    RGBDEncoder,
+    StereoJpegDecoder,
+    TrackingDecoder,
+    TrackingEncoder,
+    Utf8TextDecoder,
+)
 
 # 计时工具
 from .timing import LatencyStats, LatencyTracker, Timer
-
-# 图像传输
-from .image import ImagePublisher, ImageReceiver, ImageSender, ImageSubscriber
-
-# RGBD 传输
-from .rgbd import RGBDPublisher, RGBDReceiver, RGBDSender, RGBDSubscriber
-
-# Pose/JSON 传输
-from .pose import PosePublisher, PoseSubscriber
-
-# 追踪数据传输
-from .tracking import TrackingPublisher, TrackingSubscriber
-
-# 通用 payload 收发与编解码
-from .payload import (
-    IntDecoder,
-    MultipartReceiver,
-    MultipartSender,
-    PayloadDecoder,
-    RGBDDecoder,
-    RGBDPayloadEncoder,
-    StereoJpegDecoder,
-    TopicPayloadSender,
-    TrackingDecoder,
-    TrackingPayloadEncoder,
-    Utf8TextDecoder,
-)
 
 # 网络延迟测量
 from .latency import LatencyProbe, measure_network_latency
 
 
 __all__ = [
-    # 基础
-    "BaseNode",
-    "PushNode",
-    "PullNode",
-    "PubNode",
-    "SubNode",
+    # Payload 收发
+    "PayloadSender",
+    "PayloadReceiver",
+    # Payload 编解码
+    "PayloadDecoder",
+    "StereoJpegDecoder",
+    "RGBDEncoder",
+    "RGBDDecoder",
+    "TrackingEncoder",
+    "TrackingDecoder",
+    "Utf8TextDecoder",
     # 计时
     "LatencyStats",
     "Timer",
     "LatencyTracker",
-    # 图像
-    "ImageSender",
-    "ImageReceiver",
-    "ImagePublisher",
-    "ImageSubscriber",
-    # RGBD
-    "RGBDSender",
-    "RGBDReceiver",
-    "RGBDPublisher",
-    "RGBDSubscriber",
-    # Pose
-    "PosePublisher",
-    "PoseSubscriber",
-    # Tracking
-    "TrackingPublisher",
-    "TrackingSubscriber",
-    # Payload
-    "MultipartSender",
-    "MultipartReceiver",
-    "TopicPayloadSender",
-    "PayloadDecoder",
-    "StereoJpegDecoder",
-    "RGBDDecoder",
-    "RGBDPayloadEncoder",
-    "TrackingPayloadEncoder",
-    "TrackingDecoder",
-    "Utf8TextDecoder",
-    "IntDecoder",
     # 网络延迟
     "LatencyProbe",
     "measure_network_latency",

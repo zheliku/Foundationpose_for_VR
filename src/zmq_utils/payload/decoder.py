@@ -9,16 +9,26 @@ import numpy as np
 from numpy.typing import NDArray
 
 
+"""
+业务解码层：把 list[bytes] payload 还原为业务对象。
+
+通信分层约定：
+- 本文件只关心协议解析，不关心 socket 收发。
+- socket 收发由 zmq_utils.communicate.receiver.PayloadReceiver 负责。
+"""
+
+
 class PayloadDecoder(ABC):
-    """通用 payload 解码器接口"""
+    """通用 payload 解码器接口。"""
 
     @abstractmethod
     def decode(self, parts: list[bytes]) -> object | None:
+        """将 bytes[] 解析为目标对象；失败返回 None。"""
         pass
 
 
 class StereoJpegDecoder(PayloadDecoder):
-    """解析 [left_jpg, right_jpg] 为左右 BGR 图像"""
+    """解析 [left_jpg, right_jpg] 为左右 BGR 图像。"""
 
     def decode(
         self, parts: list[bytes]
@@ -36,7 +46,7 @@ class StereoJpegDecoder(PayloadDecoder):
 
 
 class RGBDDecoder(PayloadDecoder):
-    """解析 [color_jpg, depth_png] 为 (color, depth)"""
+    """解析 [color_jpg, depth_png] 为 (color, depth)。"""
 
     def decode(
         self, parts: list[bytes]
@@ -54,11 +64,17 @@ class RGBDDecoder(PayloadDecoder):
 
 
 class TrackingDecoder(PayloadDecoder):
-    """解析 [phase_byte, color_jpg, pose_json]"""
+    """解析 [phase_byte, color_jpg, pose_json]。"""
 
     def decode(
         self, parts: list[bytes]
     ) -> tuple[int, NDArray[np.uint8], NDArray[np.float64] | None] | None:
+        """解码 tracking payload。
+
+        返回：
+        - (phase, color, pose_matrix)
+        - 其中 pose_matrix 可为 None（无位姿）。
+        """
         if len(parts) != 3:
             return None
 
@@ -81,7 +97,7 @@ class TrackingDecoder(PayloadDecoder):
 
 
 class Utf8TextDecoder(PayloadDecoder):
-    """解析第一帧为 UTF-8 文本"""
+    """解析第一帧为 UTF-8 文本。"""
 
     def decode(self, parts: list[bytes]) -> str | None:
         if len(parts) == 0:
@@ -89,16 +105,4 @@ class Utf8TextDecoder(PayloadDecoder):
         try:
             return parts[0].decode("utf-8")
         except UnicodeDecodeError:
-            return None
-
-
-class IntDecoder(PayloadDecoder):
-    """解析第一帧为 int"""
-
-    def decode(self, parts: list[bytes]) -> int | None:
-        if len(parts) == 0:
-            return None
-        try:
-            return int(parts[0].decode("utf-8").strip())
-        except (UnicodeDecodeError, ValueError):
             return None
