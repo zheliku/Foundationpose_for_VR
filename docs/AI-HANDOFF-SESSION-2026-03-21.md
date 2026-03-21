@@ -120,3 +120,34 @@
 3. `docs/system-architecture-2026-03-20.md`
 
 目标：在保持 `640x480` 输入和现有协议兼容的前提下，把 Quest 双目链路从 35~40 FPS 稳定提升到更高，并给出可回滚实现与对比日志。
+
+---
+
+## 9. 构建异常长期修复（新增）
+
+### 现象
+
+- Quest 运行后再次打包，可能报错：`ArgumentException: An item with the same key has already been added. Key: Assembly-CSharp`。
+- 调用栈指向 Voice 包内 `Conduit` 的 `AssemblyWalker`（`Library/PackageCache/com.meta.xr.sdk.voice@.../AssemblyWalker.cs`）。
+
+### 根因
+
+- 项目使用了聚合包 `com.meta.xr.sdk.all`，会自动拉入 `com.meta.xr.sdk.voice`。
+- 即便项目未使用语音功能，Voice 的 Editor 构建回调仍会触发 Conduit 扫描并在重复 key 时崩溃。
+
+### 已落地修复
+
+- 修改 `Packages/manifest.json`：移除 `com.meta.xr.sdk.all`。
+- 改为显式声明所需 XR 子包（保留原有功能组合，但排除 `com.meta.xr.sdk.voice`）：
+  - `com.meta.xr.sdk.core`
+  - `com.meta.xr.sdk.audio`
+  - `com.meta.xr.sdk.haptics`
+  - `com.meta.xr.mrutilitykit`
+  - `com.meta.xr.sdk.platform`
+  - `com.meta.xr.sdk.interaction`
+  - `com.meta.xr.sdk.interaction.ovr`
+
+### 说明
+
+- 这是“包依赖层”的长期修复，优于每次手工删 `PackageCache` 的临时方案。
+- 该改动可随 Unity Package 解析持续生效，不依赖本地缓存热修。
