@@ -28,11 +28,25 @@ class PayloadDecoder(ABC):
 
 
 class StereoJpegDecoder(PayloadDecoder):
-    """解析 [left_jpg, right_jpg] 为左右 BGR 图像。"""
+    """解析 [left_jpg, right_jpg] 或 [packed_stereo_jpg] 为左右 BGR 图像。"""
 
     def decode(
         self, parts: list[bytes]
     ) -> tuple[NDArray[np.uint8], NDArray[np.uint8]] | None:
+        if len(parts) == 1:
+            packed = cv2.imdecode(np.frombuffer(parts[0], np.uint8), cv2.IMREAD_COLOR)
+            if packed is None:
+                return None
+
+            height, width = packed.shape[:2]
+            if width < 2:
+                return None
+
+            mid = width // 2
+            left = packed[:, :mid]
+            right = packed[:, mid:]
+            return cast(NDArray[np.uint8], left), cast(NDArray[np.uint8], right)
+
         if len(parts) != 2:
             return None
 

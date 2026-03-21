@@ -45,6 +45,7 @@ class PayloadReceiver:
         self.is_bind = bind
         self.use_topic = use_topic
         self.topic = topic
+        self.last_drain_count = 0
         self._setup_socket()
 
     """创建 socket 并执行 bind/connect。"""
@@ -79,13 +80,18 @@ class PayloadReceiver:
 
         try:
             if timeout_ms != -1 and not self.socket.poll(timeout=timeout_ms):
+                self.last_drain_count = 0
                 return None
 
             msg = self.socket.recv_multipart()
+            drained = 0
             while int(self.socket.get(zmq.EVENTS)) & zmq.POLLIN:
                 msg = self.socket.recv_multipart()
+                drained += 1
+            self.last_drain_count = drained
             return msg
         except zmq.ZMQError:
+            self.last_drain_count = 0
             return None
 
     """接收完整 packet。

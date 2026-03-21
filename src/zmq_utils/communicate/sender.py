@@ -23,15 +23,15 @@ import zmq
 
 
 class PayloadSender:
-        """通用 payload 发送器，支持可选 topic 前缀（PUSH/PUB）。
+    """通用 payload 发送器，支持可选 topic 前缀（PUSH/PUB）。
 
-        参数说明：
-        - endpoint: ZMQ 地址（如 tcp://127.0.0.1:5555）。
-        - hwm: 高水位，控制积压上限。
-        - bind: True 表示服务端 bind；False 表示客户端 connect。
-        - send_topic: True 时使用 PUB 并发送 topic；False 使用 PUSH。
-        - default_topic: send_topic=True 且 send_payload 未传 topic 时使用。
-        """
+    参数说明：
+    - endpoint: ZMQ 地址（如 tcp://127.0.0.1:5555）。
+    - hwm: 高水位，控制积压上限。
+    - bind: True 表示服务端 bind；False 表示客户端 connect。
+    - send_topic: True 时使用 PUB 并发送 topic；False 使用 PUSH。
+    - default_topic: send_topic=True 且 send_payload 未传 topic 时使用。
+    """
 
     ctx: zmq.Context[zmq.Socket[bytes]]
     socket: zmq.Socket[bytes] | None
@@ -57,6 +57,7 @@ class PayloadSender:
         self._setup_socket()
 
     """创建 socket 并执行 bind/connect。"""
+
     def _setup_socket(self) -> None:
         socket_type = zmq.PUB if self.send_topic else zmq.PUSH
         self.socket = self.ctx.socket(socket_type)
@@ -79,6 +80,7 @@ class PayloadSender:
     - True: 成功发送
     - False: 发送失败（常见于 NOBLOCK 下拥塞）
     """
+
     def send_payload(self, parts: list[bytes], topic: str | None = None) -> bool:
         if self.socket is None:
             return False
@@ -101,14 +103,17 @@ class PayloadSender:
             return False
 
     """send_payload 的同义别名，便于表达“发送多帧消息”。"""
+
     def send_multipart(self, parts: list[bytes], topic: str | None = None) -> bool:
         return self.send_payload(parts, topic=topic)
 
     """发送单帧原始字节。"""
+
     def send_raw(self, data: bytes, topic: str | None = None) -> bool:
         return self.send_payload([data], topic=topic)
 
     """发送 UTF-8 文本。"""
+
     def send_text(
         self,
         text: str,
@@ -118,10 +123,12 @@ class PayloadSender:
         return self.send_raw(text.encode(encoding), topic=topic)
 
     """发送 JSON 对象（内部转为 UTF-8 文本）。"""
+
     def send_json(self, obj: Any, topic: str | None = None) -> bool:
         return self.send_text(json.dumps(obj, ensure_ascii=False), topic=topic)
 
     """关闭 socket。"""
+
     def close(self) -> None:
         if self.socket is not None:
             self.socket.close()
