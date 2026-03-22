@@ -108,3 +108,17 @@ python scripts/run_demo.py \
 --max_disp 192 \
 --zfar 100 \
 """ }
+
+demo-ffs-fast = { cmd = """
+cd Fast-FoundationStereo &&
+python src/realsense_foundationstereo_test.py \
+--model_dir weights/20-30-48/model_best_bp2_serialize.pth \
+--valid_iters 4 \
+"""}
+
+demo-ffs-slow = { cmd = """
+cd Fast-FoundationStereo &&
+python src/realsense_foundationstereo_test.py \
+--model_dir weights/23-36-37/model_best_bp2_serialize.pth \
+--valid_iters 8 \
+"""}

@@ -78,6 +78,7 @@ class PoseTracker:
         mesh_path: str,
         cam_K: NDArray[np.float64],
         text_prompt: str,
+        symmetry_tfs: NDArray[np.float64] | None = None,
         apply_scale: float = 1.0,
         force_apply_color: bool = True,  # 匹配 on_demo3 默认值
         apply_color: list[int] | None = None,
@@ -115,6 +116,7 @@ class PoseTracker:
         """
         self.cam_K = cam_K
         self.text_prompt = text_prompt
+        self.symmetry_tfs = symmetry_tfs
         self.sam3_confidence_threshold = sam3_confidence_threshold
         self.est_refine_iter = est_refine_iter
         self.track_refine_iter = track_refine_iter
@@ -141,7 +143,7 @@ class PoseTracker:
 
         # 初始化 FoundationPose
         print("[PoseTracker] 正在初始化 FoundationPose...")
-        self.fp = self._prepare_foundationpose(self.mesh)
+        self.fp = self._prepare_foundationpose(self.mesh, self.symmetry_tfs)
 
         # 初始化 2D 跟踪器
         if self.activate_2d_tracker:
@@ -178,7 +180,11 @@ class PoseTracker:
 
         return mesh, to_origin, bbox
 
-    def _prepare_foundationpose(self, mesh: trimesh.Trimesh) -> FoundationPose:
+    def _prepare_foundationpose(
+        self,
+        mesh: trimesh.Trimesh,
+        symmetry_tfs: NDArray[np.float64] | None,
+    ) -> FoundationPose:
         """初始化 FoundationPose 估计器"""
         scorer = ScorePredictor()
         refiner = PoseRefinePredictor()
@@ -187,6 +193,7 @@ class PoseTracker:
         return FoundationPose(
             model_pts=mesh.vertices,
             model_normals=mesh.vertex_normals,
+            symmetry_tfs=symmetry_tfs,
             mesh=mesh,
             scorer=scorer,
             refiner=refiner,
