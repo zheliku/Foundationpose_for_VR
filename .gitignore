@@ -19,3 +19,6 @@ FoundationPose/weights/
 sam3/assets/sam3_ckpt/
 # samples/
 data/online/*/output
+
+checkpoints/
+mobileclip2_b.ts
