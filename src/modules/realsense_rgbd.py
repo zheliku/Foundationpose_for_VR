@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 import numpy as np
-
-from vpt_modules.types import RGBDFrame
+from numpy.typing import NDArray
 
 try:
     import pyrealsense2 as rs
@@ -14,6 +13,21 @@ except ImportError as exc:
     raise SystemExit("未找到 pyrealsense2，请先安装 RealSense Python SDK。") from exc
 
 rs_any = cast(Any, rs)
+
+
+@dataclass(slots=True)
+class RGBDFrame:
+    color_bgr: NDArray[np.uint8]
+    depth_m: NDArray[np.float64]
+    timestamp_s: float
+
+
+class RGBDSource(Protocol):
+    def start(self) -> None: ...
+
+    def read(self) -> RGBDFrame | None: ...
+
+    def stop(self) -> None: ...
 
 
 @dataclass(slots=True)

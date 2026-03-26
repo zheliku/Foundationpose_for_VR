@@ -2,15 +2,82 @@ from __future__ import annotations
 
 import argparse
 import time
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-from vpt_modules.pipeline import FirstFrameMaskPipeline
-from vpt_modules.pose import FoundationPoseConfig, FoundationPoseEstimator
-from vpt_modules.segmenters import Yoloe26Config, Yoloe26Segmenter
-from vpt_modules.sensors import RealSenseConfig, RealSenseRGBDSource
+from modules.foundationpose import FoundationPoseConfig, FoundationPoseEstimator
+from modules.realsense_rgbd import RGBDFrame
+from modules.yoloe26 import Yoloe26Config, Yoloe26Segmenter
+from modules.realsense_rgbd import RealSenseConfig, RealSenseRGBDSource
+
+
+class PipelineStatus(Enum):
+    DETECTING = "detecting"
+    TRACKING = "tracking"
+    LOST = "lost"
+
+
+@dataclass(slots=True)
+class PipelineResult:
+    status: PipelineStatus
+    pose: np.ndarray | None
+    vis_bgr: np.ndarray
+    mask_u8: np.ndarray | None
+    debug: dict[str, str]
+
+
+class _FirstFrameMaskPipeline:
+    def __init__(
+        self, segmenter: Yoloe26Segmenter, pose_estimator: FoundationPoseEstimator
+    ) -> None:
+        self.segmenter = segmenter
+        self.pose_estimator = pose_estimator
+        self._initialized = False
+
+    def process(self, frame: RGBDFrame) -> PipelineResult:
+        if not self._initialized:
+            mask_result = self.segmenter.segment(frame)
+            if mask_result.mask_u8 is None:
+                return PipelineResult(
+                    status=PipelineStatus.DETECTING,
+                    pose=None,
+                    vis_bgr=frame.color_bgr,
+                    mask_u8=None,
+                    debug={"stage": "segment"},
+                )
+
+            pose_result = self.pose_estimator.initialize(frame, mask_result.mask_u8)
+            self._initialized = pose_result.pose_4x4 is not None
+            return PipelineResult(
+                status=(
+                    PipelineStatus.TRACKING
+                    if self._initialized
+                    else PipelineStatus.LOST
+                ),
+                pose=pose_result.pose_4x4,
+                vis_bgr=pose_result.vis_bgr,
+                mask_u8=mask_result.mask_u8,
+                debug={"stage": "init"},
+            )
+
+        pose_result = self.pose_estimator.track(frame)
+        if pose_result.pose_4x4 is None:
+            self._initialized = False
+            status = PipelineStatus.LOST
+        else:
+            status = PipelineStatus.TRACKING
+
+        return PipelineResult(
+            status=status,
+            pose=pose_result.pose_4x4,
+            vis_bgr=pose_result.vis_bgr,
+            mask_u8=None,
+            debug={"stage": "track"},
+        )
 
 
 def _parse_cam_k(text: str) -> np.ndarray:
@@ -28,7 +95,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "run-rgbd-yoloe26-fp",
         help="RealSense RGBD + YOLOE26 首帧掩码 + FoundationPose",
     )
-    run_cmd.add_argument("--project_dir", type=Path, default=Path(__file__).resolve().parent.parent)
+    run_cmd.add_argument(
+        "--project_dir", type=Path, default=Path(__file__).resolve().parent.parent
+    )
     run_cmd.add_argument("--mesh_path", type=Path, required=True)
     run_cmd.add_argument("--yoloe_model", type=Path, required=True)
     run_cmd.add_argument("--prompt", type=str, default="white block")
@@ -81,7 +150,9 @@ def _run_rgbd_yoloe26_fp(args: argparse.Namespace) -> None:
             track_refine_iter=args.track_refine_iter,
         )
     )
-    pipeline = FirstFrameMaskPipeline(segmenter=segmenter, pose_estimator=pose_estimator)
+    pipeline = _FirstFrameMaskPipeline(
+        segmenter=segmenter, pose_estimator=pose_estimator
+    )
 
     window_main = "VPT Pipeline - YOLOE26 First Mask + FoundationPose"
     window_mask = "VPT Pipeline - First Mask"
@@ -99,12 +170,38 @@ def _run_rgbd_yoloe26_fp(args: argparse.Namespace) -> None:
 
             loop_s = max(time.perf_counter() - t0, 1e-6)
             inst_fps = 1.0 / loop_s
-            fps_ema = inst_fps if fps_ema == 0.0 else (1 - alpha) * fps_ema + alpha * inst_fps
+            fps_ema = (
+                inst_fps if fps_ema == 0.0 else (1 - alpha) * fps_ema + alpha * inst_fps
+            )
 
             vis = result.vis_bgr.copy()
-            cv2.putText(vis, f"Status: {result.status.value}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 80), 2)
-            cv2.putText(vis, f"FPS: {fps_ema:.1f}", (10, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 80), 2)
-            cv2.putText(vis, "Key: q/ESC", (10, 79), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 80), 2)
+            cv2.putText(
+                vis,
+                f"Status: {result.status.value}",
+                (10, 25),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 255, 80),
+                2,
+            )
+            cv2.putText(
+                vis,
+                f"FPS: {fps_ema:.1f}",
+                (10, 52),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 255, 80),
+                2,
+            )
+            cv2.putText(
+                vis,
+                "Key: q/ESC",
+                (10, 79),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 255, 80),
+                2,
+            )
 
             cv2.imshow(window_main, vis)
             if int(args.show_mask) == 1 and result.mask_u8 is not None:

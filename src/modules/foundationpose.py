@@ -3,20 +3,37 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol, cast
 
 import cv2
 import numpy as np
 import trimesh
+from numpy.typing import NDArray
 
-from vpt_modules.types import PoseResult, RGBDFrame
+from modules.realsense_rgbd import RGBDFrame
+from utils.pose_tool import adjust_pose_to_image_point
+
+
+@dataclass(slots=True)
+class PoseResult:
+    pose_4x4: NDArray[np.float64] | None
+    vis_bgr: NDArray[np.uint8]
+
+
+class PoseEstimator(Protocol):
+    def initialize(self, frame: RGBDFrame, mask_u8) -> PoseResult: ...
+
+    def track(self, frame: RGBDFrame) -> PoseResult: ...
 
 
 def _append_import_paths(project_dir: Path) -> None:
     fp_path = project_dir / "FoundationPose"
-    for p in [project_dir, fp_path]:
-        ps = str(p)
-        if ps not in sys.path:
-            sys.path.append(ps)
+    preferred = [str(fp_path), str(project_dir)]
+    for p in preferred:
+        while p in sys.path:
+            sys.path.remove(p)
+    for p in reversed(preferred):
+        sys.path.insert(0, p)
 
 
 @dataclass(slots=True)
@@ -39,22 +56,29 @@ class FoundationPoseEstimator:
             raise FileNotFoundError(f"mesh 不存在: {config.mesh_path}")
 
         _append_import_paths(config.project_dir)
+        sys.modules.pop("Utils", None)
 
         from FoundationPose.estimater import (
             FoundationPose,
             PoseRefinePredictor,
             ScorePredictor,
-            dr,
+        )
+        from FoundationPose.Utils import (
             draw_posed_3d_box,
             draw_xyz_axis,
             trimesh_add_pure_colored_texture,
         )
 
+        try:
+            from FoundationPose.Utils import dr as fp_dr
+        except Exception:
+            import nvdiffrast.torch as fp_dr
+
         self._draw_posed_3d_box = draw_posed_3d_box
         self._draw_xyz_axis = draw_xyz_axis
         self._cam_k = config.cam_k.astype(np.float64)
 
-        mesh = trimesh.load(str(config.mesh_path))
+        mesh = cast(trimesh.Trimesh, trimesh.load(str(config.mesh_path)))
         mesh.apply_scale(config.apply_scale)
         if config.force_apply_color:
             mesh = trimesh_add_pure_colored_texture(
@@ -68,7 +92,7 @@ class FoundationPoseEstimator:
 
         scorer = ScorePredictor()
         refiner = PoseRefinePredictor()
-        glctx = dr.RasterizeCudaContext()
+        glctx = None
 
         self._fp = FoundationPose(
             model_pts=mesh.vertices,
@@ -81,6 +105,15 @@ class FoundationPoseEstimator:
             debug_dir=str(config.project_dir / "FoundationPose" / "debug"),
         )
         self._pose: np.ndarray | None = None
+
+    @property
+    def pose(self) -> np.ndarray | None:
+        if self._pose is None:
+            return None
+        return self._pose.copy()
+
+    def set_camera_k(self, cam_k: np.ndarray) -> None:
+        self._cam_k = cam_k.astype(np.float64)
 
     def initialize(self, frame: RGBDFrame, mask_u8: np.ndarray) -> PoseResult:
         self._validate_frame_shapes(frame)
@@ -117,6 +150,21 @@ class FoundationPoseEstimator:
         )
         vis = self._draw(frame.color_bgr, self._pose)
         return PoseResult(pose_4x4=self._pose.copy(), vis_bgr=vis)
+
+    def apply_tracking_hint(self, x: float, y: float) -> None:
+        if self._pose is None:
+            return
+        if self._fp.pose_last is None:
+            return
+        self._fp.pose_last = adjust_pose_to_image_point(
+            ob_in_cam=self._fp.pose_last,
+            K=self._cam_k,
+            x=float(x),
+            y=float(y),
+        )
+
+    def draw_pose(self, color_bgr: np.ndarray, pose_4x4: np.ndarray) -> np.ndarray:
+        return self._draw(color_bgr, pose_4x4)
 
     def _draw(self, color_bgr: np.ndarray, pose_4x4: np.ndarray) -> np.ndarray:
         vis = color_bgr.copy()

@@ -6,13 +6,25 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 import cv2
 import numpy as np
 import torch
+from numpy.typing import NDArray
 
-from vpt_modules.types import DepthResult
+
+@dataclass(slots=True)
+class DepthResult:
+    depth_m: NDArray[np.float64]
+    valid_ratio: float
+    meta: dict[str, float]
+
+
+class StereoDepthEstimator(Protocol):
+    def estimate(
+        self, left_bgr, right_bgr, fx: float, baseline_m: float
+    ) -> DepthResult: ...
 
 
 def _load_module_from_path(module_name: str, module_path: Path) -> Any:

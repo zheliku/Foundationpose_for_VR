@@ -1,14 +1,7 @@
-import os
-import sys
-import argparse
-import json
 import torch
 import numpy as np
-from typing import List, Dict
-import multiprocessing as mp
 import cv2
 from torchvision.transforms.functional import to_tensor
-from PIL import Image
 
 from utils import visualize_mask, visualize_bbox
 
@@ -25,7 +18,7 @@ class Tracker_2D:
     def initialize(
         self,
         frame: np.ndarray,
-        init_info: Dict[str, np.ndarray],  # mask, bbox, etc.
+        init_info: dict[str, np.ndarray],  # mask, bbox, etc.
         mask_visualization_path: str = None,
         bbox_visualization_path: str = None,
     ):
@@ -61,10 +54,10 @@ class Cutie(Tracker_2D):
     def initialize(
         self,
         init_frame: np.ndarray,
-        init_info: Dict[str, np.ndarray],  # mask, bbox, etc.
+        init_info: dict[str, np.ndarray],  # mask, bbox, etc.
         mask_visualization_path: str = None,
         bbox_visualization_path: str = None,
-    ) -> List[int]:
+    ) -> list[int]:
         with torch.no_grad():
             init_frame_tensor = to_tensor(init_frame).cuda().float()
 
@@ -102,7 +95,7 @@ class Cutie(Tracker_2D):
         frame: np.ndarray,
         mask_visualization_path: str = None,
         bbox_visualization_path: str = None,
-    ) -> List[int]:
+    ) -> list[int]:
         with torch.no_grad():
             frame_tensor = to_tensor(frame).cuda().float()
             output_prob = self.cutie_processor.step(frame_tensor)
@@ -129,7 +122,7 @@ class Cutie(Tracker_2D):
     def _parse_output(
         self,
         mask_np: np.ndarray,
-    ) -> List[int]:
+    ) -> list[int]:
         # Perform erosion on the mask
         kernel = np.ones((self.erosion_size, self.erosion_size), np.uint8)
         mask_np = cv2.erode(mask_np.astype(np.uint8), kernel, iterations=1)

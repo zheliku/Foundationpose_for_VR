@@ -1,20 +1,35 @@
 from __future__ import annotations
 
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 import cv2
 import numpy as np
 import torch
 from ultralytics import YOLOE
+from numpy.typing import NDArray
 
-from vpt_modules.types import MaskResult, RGBDFrame
+from modules.realsense_rgbd import RGBDFrame
+
+
+@dataclass(slots=True)
+class MaskResult:
+    mask_u8: NDArray[np.uint8] | None
+    score: float | None
+    label: str | None
+
+
+class Segmenter(Protocol):
+    def segment(self, frame: RGBDFrame) -> MaskResult: ...
 
 
 @dataclass(slots=True)
 class Yoloe26Config:
     model_path: Path
     prompt: list[str]
+    mobileclip2_ts_path: Path | None = None
     conf: float = 0.15
     imgsz: int = 640
     max_det: int = 1
@@ -30,12 +45,40 @@ class Yoloe26Segmenter:
         if not config.model_path.exists():
             raise FileNotFoundError(f"YOLOE 权重不存在: {config.model_path}")
 
+        self._ensure_mobileclip2_asset()
+
         self.device: str | int = 0 if torch.cuda.is_available() else "cpu"
         self.model = YOLOE(str(config.model_path))
         self.model.set_classes(config.prompt)
         self.model.fuse()
 
+    def _ensure_mobileclip2_asset(self) -> None:
+        candidate_paths: list[Path] = []
+        if self.config.mobileclip2_ts_path is not None:
+            candidate_paths.append(self.config.mobileclip2_ts_path)
+
+        project_dir = Path(__file__).resolve().parents[2]
+        candidate_paths.extend(
+            [
+                project_dir / "mobileclip2_b.ts",
+                Path.cwd() / "mobileclip2_b.ts",
+            ]
+        )
+
+        asset_path = next((p for p in candidate_paths if p.exists()), None)
+        if asset_path is None:
+            return
+
+        from ultralytics.utils import SETTINGS
+
+        weights_dir = Path(SETTINGS["weights_dir"])
+        weights_dir.mkdir(parents=True, exist_ok=True)
+        target = weights_dir / "mobileclip2_b.ts"
+        if not target.exists():
+            shutil.copy2(asset_path, target)
+
     def segment(self, frame: RGBDFrame) -> MaskResult:
+        target_hw = (int(frame.color_bgr.shape[0]), int(frame.color_bgr.shape[1]))
         result = self.model.predict(
             source=frame.color_bgr,
             conf=self.config.conf,
@@ -55,10 +98,8 @@ class Yoloe26Segmenter:
             return MaskResult(mask_u8=None, score=None, label=None)
 
         best_idx = self._select_best_instance_index(result)
-        aligned_mask = self._build_aligned_mask(
-            result, best_idx, frame.color_bgr.shape[:2]
-        )
-        refined_mask = self._refine_mask(aligned_mask, frame.color_bgr.shape[:2])
+        aligned_mask = self._build_aligned_mask(result, best_idx, target_hw)
+        refined_mask = self._refine_mask(aligned_mask, target_hw)
         if refined_mask is None:
             return MaskResult(mask_u8=None, score=None, label=None)
 
@@ -108,7 +149,7 @@ class Yoloe26Segmenter:
             mask = np.zeros((h, w), dtype=np.uint8)
             polygon = np.round(result.masks.xy[best_idx]).astype(np.int32)
             if polygon.size >= 6:
-                cv2.fillPoly(mask, [polygon], 255)
+                cv2.fillPoly(mask, [polygon], (255,))
                 return mask
 
         mask_data = result.masks.data[best_idx].detach().cpu().numpy()
