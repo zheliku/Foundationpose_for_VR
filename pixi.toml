@@ -130,3 +130,7 @@ python src/vpt_cli.py run-rgbd-yoloe26-fp \
 --yoloe_model checkpoints/yoloe-26l-seg.pt \
 --prompt "white block"
 """ }
+
+demo-pipeline = { cmd = """
+python src/quest_stereo_pose_pipeline.py
+""" }

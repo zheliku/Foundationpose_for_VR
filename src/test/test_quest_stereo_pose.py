@@ -28,14 +28,26 @@ import numpy as np
 import torch
 from numpy.typing import NDArray
 
-from zmq_utils import PayloadReceiver, StereoJpegDecoder
+# 兼容从 src/test 直接运行：补齐 src 与项目根目录到导入路径。
+SCRIPT_FILE = Path(__file__).resolve()
+SRC_DIR = SCRIPT_FILE.parent.parent
+PROJECT_DIR = SRC_DIR.parent
+
+for _path in (SRC_DIR, PROJECT_DIR):
+    _path_str = str(_path)
+    if _path_str not in sys.path:
+        sys.path.insert(0, _path_str)
+
+try:
+    from zmq_utils import PayloadReceiver, StereoJpegDecoder
+except ModuleNotFoundError:
+    from src.zmq_utils import PayloadReceiver, StereoJpegDecoder
 
 if TYPE_CHECKING:
     from pose_tracker_api import PoseTracker
 
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_DIR = SCRIPT_DIR.parent
+SCRIPT_DIR = SRC_DIR
 FFS_DIR = PROJECT_DIR / "Fast-FoundationStereo"
 
 if str(FFS_DIR) not in sys.path:

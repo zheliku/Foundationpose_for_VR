@@ -28,13 +28,50 @@ class StereoCalibration:
     calib_width: int
     calib_height: int
 
-    def scaled_k(self, width: int, height: int) -> np.ndarray:
-        sx = width / max(self.calib_width, 1)
-        sy = height / max(self.calib_height, 1)
+    def _compute_center_crop_mapping(
+        self, width: int, height: int
+    ) -> tuple[float, float, float, float]:
+        src_w = float(max(self.calib_width, 1))
+        src_h = float(max(self.calib_height, 1))
+        dst_w = float(max(width, 1))
+        dst_h = float(max(height, 1))
+
+        src_aspect = src_w / src_h
+        dst_aspect = dst_w / dst_h
+
+        crop_x = 0.0
+        crop_y = 0.0
+        crop_w = src_w
+        crop_h = src_h
+
+        if abs(src_aspect - dst_aspect) > 1e-6:
+            if src_aspect > dst_aspect:
+                crop_w = src_h * dst_aspect
+                crop_x = (src_w - crop_w) * 0.5
+            else:
+                crop_h = src_w / dst_aspect
+                crop_y = (src_h - crop_h) * 0.5
+
+        sx = dst_w / max(crop_w, 1e-6)
+        sy = dst_h / max(crop_h, 1e-6)
+        return crop_x, crop_y, sx, sy
+
+    def scaled_k(
+        self, width: int, height: int, assume_center_crop: bool = True
+    ) -> np.ndarray:
+        if assume_center_crop:
+            crop_x, crop_y, sx, sy = self._compute_center_crop_mapping(width, height)
+            cx = (self.left_cx - crop_x) * sx
+            cy = (self.left_cy - crop_y) * sy
+        else:
+            sx = width / max(self.calib_width, 1)
+            sy = height / max(self.calib_height, 1)
+            cx = self.left_cx * sx
+            cy = self.left_cy * sy
         return np.array(
             [
-                [self.left_fx * sx, 0.0, self.left_cx * sx],
-                [0.0, self.left_fy * sy, self.left_cy * sy],
+                [self.left_fx * sx, 0.0, cx],
+                [0.0, self.left_fy * sy, cy],
                 [0.0, 0.0, 1.0],
             ],
             dtype=np.float64,
@@ -60,6 +97,9 @@ class QuestStereoPoseConfig:
     stats_interval: int = 30
     min_depth_m: float = 0.1
     max_depth_m: float = 3.0
+    calib_assume_center_crop: bool = True
+    enable_pose_warmup: bool = True
+    pose_warmup_mask_ratio: float = 0.2
 
 
 def _read_json(path: Path) -> dict:
@@ -142,7 +182,11 @@ class QuestStereoPoseRunner:
                 if int(config.process_height) > 0
                 else int(self.calib.calib_height)
             )
-            init_cam_k = self.calib.scaled_k(width=init_width, height=init_height)
+            init_cam_k = self.calib.scaled_k(
+                width=init_width,
+                height=init_height,
+                assume_center_crop=bool(config.calib_assume_center_crop),
+            )
             logging.info(
                 "[QuestPipeline] Loading FoundationPose (init K: %dx%d)...",
                 init_width,
@@ -165,6 +209,12 @@ class QuestStereoPoseRunner:
         self.cutie_tracker: CutieTracker2D | None = None
         self.initialized = False
         self.frame_count = 0
+        self.recv_count = 0
+        self.pose_warmup_done = False
+        self.has_warned_packed_mode = False
+        self.has_warned_aspect_stretch = False
+        self.has_warned_calib_aspect_mismatch = False
+        self.has_logged_k_mapping = False
 
     def _build_pose_estimator(self, cam_k: np.ndarray) -> FoundationPoseEstimator:
         return FoundationPoseEstimator(
@@ -196,6 +246,14 @@ class QuestStereoPoseRunner:
             parts = self.receiver.recv_payload(timeout_ms=100)
             if parts is None:
                 continue
+            self.recv_count += 1
+
+            decode_mode = "PackedSingleJpeg" if len(parts) == 1 else "DualJpeg"
+            if decode_mode == "PackedSingleJpeg" and not self.has_warned_packed_mode:
+                self.has_warned_packed_mode = True
+                logging.warning(
+                    "[Quality] 当前为 PackedSingleJpeg 模式，立体匹配精度通常低于 DualJpeg。建议在 Unity 将 packStereoIntoSingleJpeg 关闭，并提高 JPEG 质量或切 PNG。"
+                )
 
             parsed = self.decoder.decode(parts)
             if parsed is None:
@@ -211,16 +269,99 @@ class QuestStereoPoseRunner:
                 left_bgr = cv2.resize(left_bgr, (w, h))
                 right_bgr = cv2.resize(right_bgr, (w, h))
 
+            src_h, src_w = left_bgr.shape[:2]
+            if (
+                not self.has_warned_calib_aspect_mismatch
+                and self.calib.calib_width > 0
+                and self.calib.calib_height > 0
+                and src_w > 0
+                and src_h > 0
+            ):
+                calib_ratio = float(self.calib.calib_width) / float(
+                    self.calib.calib_height
+                )
+                frame_ratio = float(src_w) / float(src_h)
+                if abs(calib_ratio - frame_ratio) > 1e-3:
+                    self.has_warned_calib_aspect_mismatch = True
+                    logging.warning(
+                        "[CalibAspect] 标定分辨率=%dx%d(%.3f), 输入帧=%dx%d(%.3f)。若上游存在裁剪而非等比缩放，按当前方式缩放 K 可能造成 3D 框形变。",
+                        self.calib.calib_width,
+                        self.calib.calib_height,
+                        calib_ratio,
+                        src_w,
+                        src_h,
+                        frame_ratio,
+                    )
+
             if self.config.process_width > 0 and self.config.process_height > 0:
+                target_w = int(self.config.process_width)
+                target_h = int(self.config.process_height)
+                if (
+                    not self.has_warned_aspect_stretch
+                    and target_w > 0
+                    and target_h > 0
+                    and src_w > 0
+                    and src_h > 0
+                ):
+                    src_ratio = float(src_w) / float(src_h)
+                    dst_ratio = float(target_w) / float(target_h)
+                    if abs(src_ratio - dst_ratio) > 1e-3:
+                        self.has_warned_aspect_stretch = True
+                        logging.warning(
+                            "[Aspect] 处理尺寸会改变宽高比: src=%dx%d(%.3f), target=%dx%d(%.3f)。如不希望拉伸，请将 --process_width/--process_height 设为与输入同宽高比（例如 640x480）。",
+                            src_w,
+                            src_h,
+                            src_ratio,
+                            target_w,
+                            target_h,
+                            dst_ratio,
+                        )
+
                 left_bgr = cv2.resize(
-                    left_bgr, (self.config.process_width, self.config.process_height)
+                    left_bgr,
+                    (target_w, target_h),
+                    interpolation=(
+                        cv2.INTER_AREA
+                        if target_w < src_w or target_h < src_h
+                        else cv2.INTER_LINEAR
+                    ),
                 )
                 right_bgr = cv2.resize(
-                    right_bgr, (self.config.process_width, self.config.process_height)
+                    right_bgr,
+                    (target_w, target_h),
+                    interpolation=(
+                        cv2.INTER_AREA
+                        if target_w < src_w or target_h < src_h
+                        else cv2.INTER_LINEAR
+                    ),
                 )
 
             h, w = left_bgr.shape[:2]
-            cam_k = self.calib.scaled_k(width=w, height=h)
+            cam_k = self.calib.scaled_k(
+                width=w,
+                height=h,
+                assume_center_crop=bool(self.config.calib_assume_center_crop),
+            )
+            if not self.has_logged_k_mapping:
+                self.has_logged_k_mapping = True
+                map_mode = (
+                    "center-crop+scale"
+                    if bool(self.config.calib_assume_center_crop)
+                    else "linear-scale-only"
+                )
+                logging.info(
+                    "[KMap] mode=%s K=[fx=%.2f fy=%.2f cx=%.2f cy=%.2f] frame=%dx%d calib=%dx%d",
+                    map_mode,
+                    float(cam_k[0, 0]),
+                    float(cam_k[1, 1]),
+                    float(cam_k[0, 2]),
+                    float(cam_k[1, 2]),
+                    w,
+                    h,
+                    self.calib.calib_width,
+                    self.calib.calib_height,
+                )
+
             if self.pose_estimator is None:
                 logging.info("[QuestPipeline] Lazy-loading FoundationPose...")
                 self.pose_estimator = self._build_pose_estimator(cam_k)
@@ -245,6 +386,24 @@ class QuestStereoPoseRunner:
                 depth_m=depth_m,
                 timestamp_s=time.perf_counter(),
             )
+
+            if (
+                self.pose_estimator is not None
+                and bool(self.config.enable_pose_warmup)
+                and not self.pose_warmup_done
+            ):
+                warmup_t0 = time.perf_counter()
+                self.pose_estimator.warmup(
+                    frame,
+                    mask_ratio=float(self.config.pose_warmup_mask_ratio),
+                    iteration=1,
+                )
+                warmup_ms = (time.perf_counter() - warmup_t0) * 1000.0
+                self.pose_warmup_done = True
+                logging.info(
+                    "[QuestPipeline] FoundationPose warmup finished in %.1fms",
+                    warmup_ms,
+                )
 
             if not self.initialized:
                 mask_result = self.segmenter.segment(frame)
@@ -275,9 +434,11 @@ class QuestStereoPoseRunner:
 
             if self.frame_count % max(self.config.stats_interval, 1) == 0:
                 logging.info(
-                    "[QuestPipeline] frames=%d phase=%s fps=%.1f depth_valid=%.1f%%",
+                    "[QuestPipeline] recv=%d frames=%d phase=%s mode=%s fps=%.1f depth_valid=%.1f%%",
+                    self.recv_count,
                     self.frame_count,
                     phase,
+                    decode_mode,
                     fps,
                     float((depth_m > 0).mean() * 100.0),
                 )
@@ -388,6 +549,24 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max_frames", type=int, default=0)
     parser.add_argument("--stats_interval", type=int, default=30)
+    parser.add_argument(
+        "--calib_assume_center_crop",
+        type=int,
+        default=1,
+        help="当标定分辨率与输入分辨率宽高比不一致时，按中心裁剪后再缩放内参。1=启用(推荐)，0=仅线性缩放。",
+    )
+    parser.add_argument(
+        "--enable_pose_warmup",
+        type=int,
+        default=1,
+        help="1=首帧做一次 FoundationPose 预热（把首次耗时前置），0=关闭。",
+    )
+    parser.add_argument(
+        "--pose_warmup_mask_ratio",
+        type=float,
+        default=0.2,
+        help="FoundationPose 预热时使用的中心掩码占比（0-1）。",
+    )
     return parser.parse_args()
 
 
@@ -412,6 +591,9 @@ def main() -> None:
         enable_cutie=bool(args.enable_cutie),
         preload_foundationpose=bool(args.preload_foundationpose),
         stats_interval=args.stats_interval,
+        calib_assume_center_crop=bool(args.calib_assume_center_crop),
+        enable_pose_warmup=bool(args.enable_pose_warmup),
+        pose_warmup_mask_ratio=float(args.pose_warmup_mask_ratio),
     )
     logging.info("[QuestPipeline] Starting...")
     logging.info(

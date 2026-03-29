@@ -32,7 +32,7 @@ except ImportError as exc:
 rs_any = cast(Any, rs)
 
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+SCRIPT_DIR = Path(__file__).resolve().parent.parent
 PROJECT_DIR = SCRIPT_DIR.parent
 FFS_DIR = PROJECT_DIR / "Fast-FoundationStereo"
 

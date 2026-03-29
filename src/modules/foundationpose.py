@@ -115,6 +115,43 @@ class FoundationPoseEstimator:
     def set_camera_k(self, cam_k: np.ndarray) -> None:
         self._cam_k = cam_k.astype(np.float64)
 
+    def warmup(
+        self,
+        frame: RGBDFrame,
+        mask_ratio: float = 0.2,
+        iteration: int | None = None,
+    ) -> None:
+        self._validate_frame_shapes(frame)
+
+        h, w = frame.color_bgr.shape[:2]
+        ratio = float(np.clip(mask_ratio, 0.05, 0.95))
+        box_w = max(8, int(w * ratio))
+        box_h = max(8, int(h * ratio))
+        x0 = max((w - box_w) // 2, 0)
+        y0 = max((h - box_h) // 2, 0)
+        x1 = min(x0 + box_w, w)
+        y1 = min(y0 + box_h, h)
+
+        warmup_mask = np.zeros((h, w), dtype=np.uint8)
+        warmup_mask[y0:y1, x0:x1] = 255
+
+        old_pose = None if self._pose is None else self._pose.copy()
+        warmup_iter = int(iteration) if iteration is not None else 1
+        warmup_iter = max(warmup_iter, 1)
+
+        try:
+            self._fp.register(
+                K=self._cam_k,
+                rgb=frame.color_bgr,
+                depth=frame.depth_m,
+                ob_mask=warmup_mask,
+                iteration=warmup_iter,
+            )
+        except Exception:
+            pass
+        finally:
+            self._pose = old_pose
+
     def initialize(self, frame: RGBDFrame, mask_u8: np.ndarray) -> PoseResult:
         self._validate_frame_shapes(frame)
 
