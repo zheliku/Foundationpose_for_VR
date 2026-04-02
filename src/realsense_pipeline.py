@@ -4,6 +4,7 @@ RealSense 主流程：
 2) YOLOE26 实时分割 cube mask。
 3) Fast-FoundationStereo 估计同帧深度。
 4) 将同帧 RGB + Depth + Mask 输入 FoundationPose 实时估计位姿并绘制。
+5) 可选接入 Cutie 2D 跟踪，用 bbox 中心对 FoundationPose 的 pose_last 做先验校正。
 
 说明：
 - 本脚本只保留一个主流程入口，不再提供独立测试函数。
@@ -43,6 +44,7 @@ from modules import (
     Yoloe26Config,
     Yoloe26Masker,
 )
+from modules.cutie import CutieConfig, CutieTracker
 
 rs_any = cast(Any, rs)
 
@@ -205,6 +207,10 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument("--stats_interval", type=int, default=30)
+
+    # 2D 跟踪（Cutie）配置：用于给 FoundationPose 提供图像平面先验，提升快速运动下稳定性。
+    parser.add_argument("--activate_2d_tracker", type=int, default=1)
+    parser.add_argument("--cutie_erosion_size", type=int, default=5)
     return parser.parse_args()
 
 
@@ -275,6 +281,17 @@ def main() -> None:
         )
     )
 
+    # Cutie 只作为 2D 先验，不替代 FoundationPose。
+    use_2d_tracker = bool(args.activate_2d_tracker)
+    cutie_tracker = (
+        CutieTracker(
+            CutieConfig(seg_threshold=0.1, erosion_size=int(args.cutie_erosion_size))
+        )
+        if use_2d_tracker
+        else None
+    )
+    cutie_initialized = False
+
     # stage 用于在同一个主流程中测试各阶段，不拆分独立方法。
     # 1: RealSense, 2: +YOLO, 3: +FFS, 4: +FoundationPose
     stage = 4
@@ -285,6 +302,7 @@ def main() -> None:
     stats_t = start_t
     yolo_acc = 0.0
     ffs_acc = 0.0
+    cutie_acc = 0.0
     pose_acc = 0.0
 
     cv2.namedWindow("Pipeline", cv2.WINDOW_AUTOSIZE)
@@ -304,6 +322,7 @@ def main() -> None:
             yolo_ms = 0.0
             ffs_ms = 0.0
             pose_ms = 0.0
+            cutie_ms = 0.0
             det_count = 0
             mask_bw = np.zeros(left_bgr.shape[:2], dtype=np.uint8)
             depth_m = np.zeros(left_bgr.shape[:2], dtype=np.float32)
@@ -341,6 +360,9 @@ def main() -> None:
             if stage >= 4:
                 t2 = time.perf_counter()
 
+                cutie_bbox = [-1, -1, 0, 0]
+                cutie_mask: np.ndarray | None = None
+
                 # register 使用“同帧 left + 同帧 depth + 同帧 mask”。
                 if not has_pose:
                     if det_count > 0 and np.count_nonzero(mask_bw) > 0:
@@ -351,15 +373,66 @@ def main() -> None:
                         )
                         vis = pose_estimator.visualize_pose(left_bgr, pose)
                         has_pose = True
+                        # 成功 register 后，用同帧 mask 初始化 Cutie。
+                        if cutie_tracker is not None:
+                            ct0 = time.perf_counter()
+                            try:
+                                _ = cutie_tracker.initialize(
+                                    left_bgr, init_mask=mask_bw
+                                )
+                                cutie_initialized = True
+                            except Exception as exc:
+                                cutie_initialized = False
+                                logging.warning("[cutie] 初始化失败: %s", exc)
+                            cutie_ms = (time.perf_counter() - ct0) * 1000.0
+                            cutie_acc += cutie_ms
                         phase = "REGISTER"
                     else:
                         phase = "WAIT_DETECT"
                 else:
+                    # 跟踪阶段：先用 Cutie 获取 2D 目标中心，再修正 pose_last 作为 track 的初值。
+                    if cutie_tracker is not None and cutie_initialized:
+                        ct0 = time.perf_counter()
+                        try:
+                            cutie_res = cutie_tracker.track(left_bgr)
+                            cutie_bbox = cutie_res.bbox_xywh
+                            cutie_mask = (cutie_res.mask > 0).astype(np.uint8) * 255
+
+                            x, y, w, h = cutie_bbox
+                            if w > 0 and h > 0:
+                                cx = float(x + w / 2.0)
+                                cy = float(y + h / 2.0)
+                                pose_estimator.adjust_pose_to_image_point(cx, cy)
+                            elif det_count > 0 and np.count_nonzero(mask_bw) > 0:
+                                # 若 Cutie 丢失但 YOLO 有有效 mask，则重新初始化 Cutie。
+                                _ = cutie_tracker.initialize(
+                                    left_bgr, init_mask=mask_bw
+                                )
+                                cutie_initialized = True
+                        except Exception as exc:
+                            logging.warning("[cutie] 跟踪失败: %s", exc)
+                            cutie_initialized = False
+                        cutie_ms = (time.perf_counter() - ct0) * 1000.0
+                        cutie_acc += cutie_ms
+
                     pose = pose_estimator.track(
                         rgb=left_bgr,
                         depth=depth_m.astype(np.float64),
                     )
                     vis = pose_estimator.visualize_pose(left_bgr, pose)
+
+                    # 在位姿结果图上叠加 Cutie bbox，便于观察 2D 引导是否正常。
+                    if cutie_bbox[2] > 0 and cutie_bbox[3] > 0:
+                        x, y, w, h = cutie_bbox
+                        cv2.rectangle(
+                            vis,
+                            (int(x), int(y)),
+                            (int(x + w), int(y + h)),
+                            (0, 255, 255),
+                            2,
+                        )
+                        if cutie_mask is not None:
+                            mask_bw = cutie_mask
                     phase = "TRACK"
 
                 pose_ms = (time.perf_counter() - t2) * 1000.0
@@ -383,7 +456,7 @@ def main() -> None:
             )
             draw_text(
                 vis,
-                f"yolo={yolo_ms:.1f}ms ffs={ffs_ms:.1f}ms pose={pose_ms:.1f}ms depth_valid={depth_valid:.1%}",
+                f"yolo={yolo_ms:.1f}ms ffs={ffs_ms:.1f}ms cutie={cutie_ms:.1f}ms pose={pose_ms:.1f}ms depth_valid={depth_valid:.1%}",
                 12,
                 54,
             )
@@ -403,10 +476,12 @@ def main() -> None:
                 # 切换阶段时重置 pose，避免阶段切换造成状态污染。
                 has_pose = False
                 pose_estimator.reset()
+                cutie_initialized = False
                 logging.info("[pipeline] switch stage -> %d", stage)
             if key == ord("r"):
                 has_pose = False
                 pose_estimator.reset()
+                cutie_initialized = False
                 logging.info("[pipeline] reset -> 等待重新检测")
 
             if frame_count % max(int(args.stats_interval), 1) == 0:
@@ -414,7 +489,7 @@ def main() -> None:
                 interval = max(now - stats_t, 1e-6)
                 proc_fps = int(args.stats_interval) / interval
                 logging.info(
-                    "[stats] frames=%d stage=%d phase=%s total_fps=%.1f proc_fps=%.1f avg(yolo/ffs/pose)=%.1f/%.1f/%.1fms",
+                    "[stats] frames=%d stage=%d phase=%s total_fps=%.1f proc_fps=%.1f avg(yolo/ffs/cutie/pose)=%.1f/%.1f/%.1f/%.1fms",
                     frame_count,
                     stage,
                     phase,
@@ -422,11 +497,13 @@ def main() -> None:
                     proc_fps,
                     yolo_acc / max(int(args.stats_interval), 1),
                     ffs_acc / max(int(args.stats_interval), 1),
+                    cutie_acc / max(int(args.stats_interval), 1),
                     pose_acc / max(int(args.stats_interval), 1),
                 )
                 stats_t = now
                 yolo_acc = 0.0
                 ffs_acc = 0.0
+                cutie_acc = 0.0
                 pose_acc = 0.0
 
     except KeyboardInterrupt:

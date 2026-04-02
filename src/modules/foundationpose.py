@@ -82,18 +82,45 @@ class FoundationPoseEstimator:
         # 兼容两种运行方式：
         # 1) 作为包导入 FoundationPose.estimater
         # 2) 直接把 FoundationPose 目录加入 sys.path 后导入 estimater
+        #
+        # 关键：FoundationPose 与 Fast-FoundationStereo 都有顶层同名 `Utils`。
+        # 若先初始化 FFS，再初始化 FoundationPose，`from Utils import *` 可能错误命中 FFS 的 Utils，
+        # 导致 compute_mesh_diameter 等符号缺失。这里临时把 `Utils` 绑定到 FoundationPose.Utils。
         try:
-            est_mod = importlib.import_module("FoundationPose.estimater")
+            utils_mod = importlib.import_module("FoundationPose.Utils")
         except ModuleNotFoundError:
-            est_mod = importlib.import_module("estimater")
+            utils_mod = importlib.import_module("Utils")
 
-        self.ScorePredictor = est_mod.ScorePredictor
-        self.PoseRefinePredictor = est_mod.PoseRefinePredictor
-        self.dr = est_mod.dr
-        self.FoundationPose = est_mod.FoundationPose
-        self.trimesh_add_pure_colored_texture = est_mod.trimesh_add_pure_colored_texture
-        self.draw_posed_3d_box = est_mod.draw_posed_3d_box
-        self.draw_xyz_axis = est_mod.draw_xyz_axis
+        old_utils_module = sys.modules.get("Utils")
+        sys.modules["Utils"] = utils_mod
+        try:
+            try:
+                est_mod = importlib.import_module("FoundationPose.estimater")
+            except ModuleNotFoundError:
+                est_mod = importlib.import_module("estimater")
+        finally:
+            if old_utils_module is None:
+                sys.modules.pop("Utils", None)
+            else:
+                sys.modules["Utils"] = old_utils_module
+
+        # 不同版本导出位置不一致：优先用 estimater，其次回退到 Utils。
+        def _resolve_symbol(name: str) -> Any:
+            if hasattr(est_mod, name):
+                return getattr(est_mod, name)
+            if hasattr(utils_mod, name):
+                return getattr(utils_mod, name)
+            raise RuntimeError(f"FoundationPose 符号缺失: {name}")
+
+        self.ScorePredictor = _resolve_symbol("ScorePredictor")
+        self.PoseRefinePredictor = _resolve_symbol("PoseRefinePredictor")
+        self.dr = _resolve_symbol("dr")
+        self.FoundationPose = _resolve_symbol("FoundationPose")
+        self.trimesh_add_pure_colored_texture = _resolve_symbol(
+            "trimesh_add_pure_colored_texture"
+        )
+        self.draw_posed_3d_box = _resolve_symbol("draw_posed_3d_box")
+        self.draw_xyz_axis = _resolve_symbol("draw_xyz_axis")
 
         # 加载并预处理 mesh。
         loaded_mesh = trimesh.load(self.cfg.mesh_path)
@@ -115,6 +142,12 @@ class FoundationPoseEstimator:
         self.to_origin, extents = trimesh.bounds.oriented_bounds(self.mesh)
         self.bbox = np.stack([-extents / 2, extents / 2], axis=0).reshape(2, 3)
 
+        # FoundationPose 内部会对 debug_dir 调用 os.makedirs。
+        # 因此这里必须保证传入的是有效字符串路径，不能为 None。
+        effective_debug_dir = self.cfg.debug_dir
+        if effective_debug_dir is None or str(effective_debug_dir).strip() == "":
+            effective_debug_dir = str(self.foundationpose_root / "debug" / "api")
+
         # 初始化 FoundationPose 网络与渲染上下文。
         scorer = self.ScorePredictor()
         refiner = self.PoseRefinePredictor()
@@ -128,7 +161,7 @@ class FoundationPoseEstimator:
             scorer=scorer,
             refiner=refiner,
             glctx=glctx,
-            debug_dir=self.cfg.debug_dir,
+            debug_dir=effective_debug_dir,
             debug=int(self.cfg.debug),
         )
 
@@ -365,9 +398,7 @@ if __name__ == "__main__":
         depth = reader.get_depth(i)
 
         if i == 0:
-            init_mask_img = cv2.imread(
-                str(init_mask_path), cv2.IMREAD_GRAYSCALE
-            )
+            init_mask_img = cv2.imread(str(init_mask_path), cv2.IMREAD_GRAYSCALE)
             if init_mask_img is None:
                 raise RuntimeError(f"初始 mask 读取失败: {init_mask_path}")
             init_mask = init_mask_img.astype(bool)
