@@ -6,6 +6,7 @@ from .fast_foundationstereo import (
     FastFoundationStereoConfig,
     FastFoundationStereoRealtime,
 )
+from .quest_stereo import QuestStereoCamera, QuestStereoFrame
 from .foundationpose import FoundationPoseConfig, FoundationPoseEstimator
 
 __all__ = [
@@ -17,6 +18,8 @@ __all__ = [
     "Yoloe26Result",
     "FastFoundationStereoConfig",
     "FastFoundationStereoRealtime",
+    "QuestStereoCamera",
+    "QuestStereoFrame",
     "FoundationPoseConfig",
     "FoundationPoseEstimator",
 ]
