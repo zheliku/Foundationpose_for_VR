@@ -115,20 +115,20 @@ cd Fast-FoundationStereo &&
 python src/realsense_foundationstereo_test.py \
 --model_dir weights/20-30-48/model_best_bp2_serialize.pth \
 --valid_iters 4 \
-"""}
+""" }
 
 demo-ffs-slow = { cmd = """
 cd Fast-FoundationStereo &&
 python src/realsense_foundationstereo_test.py \
 --model_dir weights/23-36-37/model_best_bp2_serialize.pth \
 --valid_iters 8 \
-"""}
+""" }
 
 demo-yoloe = { cmd = """
-python src/vpt_cli.py run-rgbd-yoloe26-fp \
+python src/pipeline/realsense_pipeline.py \
 --mesh_path data/online/cube/mesh/cube.stl \
---yoloe_model checkpoints/yoloe-26l-seg.pt \
---prompt "white block"
+--yolo_model_path checkpoints/yoloe-26l-seg.pt \
+--yolo_prompt "white block"
 """ }
 
 demo-pipeline = { cmd = """

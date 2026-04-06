@@ -20,15 +20,12 @@ if __package__ is None or __package__ == "":
         sys.path.append(str(SRC_DIR))
 
 from modules import (  # noqa: E402
-    FastFoundationStereoConfig,
     FastFoundationStereoRealtime,
-    FoundationPoseConfig,
     FoundationPoseEstimator,
     RealSenseCamera,
-    Yoloe26Config,
     Yoloe26Masker,
 )
-from modules.cutie import CutieConfig, CutieTracker  # noqa: E402
+from modules.cutie import CutieTracker  # noqa: E402
 
 try:
     import pyrealsense2 as rs
@@ -100,35 +97,59 @@ class PosePipelineOutput:
 # =========================
 
 
-def _to_bgr(gray_or_bgr: np.ndarray) -> np.ndarray:
-    """把输入图像统一成 BGR 三通道。"""
-    if gray_or_bgr.ndim == 2:
-        return cv2.cvtColor(gray_or_bgr, cv2.COLOR_GRAY2BGR)
-    return gray_or_bgr[..., :3]
+def _draw_hud(
+    img: np.ndarray,
+    lines: str | list[str],
+    x: int = 12,
+    y: int = 28,
+    line_gap: int = 24,
+) -> None:
+    """统一绘制 HUD 文本并按图像宽度自适应换行。"""
+    max_chars = max((img.shape[1] - x - 12) // 9, 12)
+    wrapped: list[str] = []
 
+    line_list = [lines] if isinstance(lines, str) else lines
 
-def _draw_text(img: np.ndarray, text: str, x: int, y: int) -> None:
-    """统一文本绘制样式，便于在高亮和暗部都可读。"""
-    cv2.putText(
-        img,
-        text,
-        (x, y),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.58,
-        (15, 15, 15),
-        2,
-        cv2.LINE_AA,
-    )
-    cv2.putText(
-        img,
-        text,
-        (x, y),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.58,
-        (245, 245, 245),
-        1,
-        cv2.LINE_AA,
-    )
+    for line in line_list:
+        if len(line) <= max_chars:
+            wrapped.append(line)
+            continue
+
+        words = line.split(" ")
+        current = ""
+        for word in words:
+            candidate = f"{current} {word}".strip()
+            if len(candidate) <= max_chars:
+                current = candidate
+            else:
+                if current:
+                    wrapped.append(current)
+                current = word
+        if current:
+            wrapped.append(current)
+
+    for idx, line in enumerate(wrapped):
+        yy = y + idx * line_gap
+        cv2.putText(
+            img,
+            line,
+            (x, yy),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.58,
+            (15, 15, 15),
+            2,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            img,
+            line,
+            (x, yy),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.58,
+            (245, 245, 245),
+            1,
+            cv2.LINE_AA,
+        )
 
 
 def _colorize_depth(
@@ -170,16 +191,6 @@ def _generate_cube_symmetry_tfs() -> np.ndarray:
     return np.stack(out, axis=0)
 
 
-def _bool_flag(flag: int | bool) -> bool:
-    """统一处理 int/bool 风格开关参数。"""
-    return bool(int(flag)) if isinstance(flag, (int, np.integer)) else bool(flag)
-
-
-def _path_str(path: Any) -> str:
-    """把 Path/其他路径对象统一转成字符串。"""
-    return str(path)
-
-
 # =========================
 # RealSense Pipeline 实现
 # =========================
@@ -190,7 +201,7 @@ class RealSenseStereoPosePipeline:
     RealSense 位姿 Pipeline（结构化独立实现）。
 
     说明：
-    1. `start()`：初始化相机和模型状态。
+    1. `start()`：仅启动相机并重置运行状态。
     2. `run()`：处理一帧并返回 `PosePipelineOutput`。
     3. `stop()`：释放资源。
 
@@ -202,6 +213,42 @@ class RealSenseStereoPosePipeline:
     - `PosePipelineOutput`，核心是 `pose_4x4`（可用于传输到 Quest）。
     """
 
+    # 依赖注入。
+    args: argparse.Namespace  # 命令行/配置参数集合。
+    camera: RealSenseCamera  # RealSense 双目输入源。
+    yolo: Yoloe26Masker  # 2D 分割模块。
+    ffs: FastFoundationStereoRealtime  # 双目深度模块。
+    cutie_tracker: CutieTracker | None  # 可选 2D 跟踪模块。
+
+    # 运行期对象与相机状态。
+    pose_estimator: FoundationPoseEstimator | None = None  # FoundationPose 估计器。
+    cam_k: np.ndarray | None = None  # 当前左目内参 K。
+    baseline_m: float = 0.0  # 左右相机基线（米）。
+    fx: float = 0.0  # 左目焦距 fx。
+
+    # 可配置运行参数。
+    symmetry_tfs: np.ndarray | None = None  # 对称变换集合。
+    min_depth: float = 0.1  # 最小有效深度（米）。
+    max_depth: float = 3.0  # 最大有效深度（米）。
+    stats_interval: int = 30  # 统计日志输出间隔（帧）。
+
+    # 流程状态标志。
+    stage: int = 4  # 当前处理阶段（1..4）。
+    _started: bool = False  # Pipeline 是否已启动。
+    _has_pose: bool = False  # 是否已完成首次注册并进入跟踪。
+    _cutie_initialized: bool = False  # Cutie 是否已初始化。
+
+    # 性能统计累加器。
+    _frame_count: int = 0  # 已处理帧数。
+    _start_t: float = 0.0  # 整体统计起始时间。
+    _stats_t: float = 0.0  # 上次统计打印时间。
+    _last_frame_t: float = 0.0  # 上一帧完成时间（用于实时 FPS）。
+    _fps_rt: float = 0.0  # 平滑后的实时 FPS。
+    _yolo_acc: float = 0.0  # 累计 YOLO 耗时（毫秒）。
+    _depth_acc: float = 0.0  # 累计深度估计耗时（毫秒）。
+    _cutie_acc: float = 0.0  # 累计 Cutie 耗时（毫秒）。
+    _pose_acc: float = 0.0  # 累计位姿估计耗时（毫秒）。
+
     def __init__(
         self,
         args: argparse.Namespace,
@@ -210,20 +257,26 @@ class RealSenseStereoPosePipeline:
         ffs: FastFoundationStereoRealtime,
         cutie_tracker: CutieTracker | None,
     ) -> None:
-        # 保存配置与模块对象，保持依赖关系明确。
+        """
+        初始化 RealSense 位姿 Pipeline。
+
+        参数：
+        - args: 命令行与运行配置。
+        - camera: RealSense 双目输入模块。
+        - yolo: 2D 分割模块。
+        - ffs: 双目深度模块。
+        - cutie_tracker: 可选 2D 跟踪模块。
+
+        初始化流程：
+        1. 绑定外部依赖对象。
+        2. 读取对称性与深度阈值配置。
+        3. 等待 run 阶段按需读取相机内参与构建 PoseEstimator。
+        """
         self.args = args
         self.camera = camera
         self.yolo = yolo
         self.ffs = ffs
         self.cutie_tracker = cutie_tracker
-
-        # FoundationPose 在拿到实时内参后初始化。
-        self.pose_estimator: FoundationPoseEstimator | None = None
-
-        # 相机参数在 start 时从设备读取。
-        self.cam_k: np.ndarray | None = None
-        self.baseline_m = 0.0
-        self.fx = 0.0
 
         # 对称约束预先缓存，避免循环内重复计算。
         self.symmetry_tfs = (
@@ -234,24 +287,6 @@ class RealSenseStereoPosePipeline:
         self.min_depth = float(args.min_depth)
         self.max_depth = float(args.max_depth)
         self.stats_interval = max(int(args.stats_interval), 1)
-
-        # 运行阶段：
-        # 1=仅输入、2=+YOLO、3=+深度、4=+位姿。
-        self.stage = 4
-
-        # 运行状态位。
-        self._started = False
-        self._has_pose = False
-        self._cutie_initialized = False
-
-        # 统计累加器。
-        self._frame_count = 0
-        self._start_t = 0.0
-        self._stats_t = 0.0
-        self._yolo_acc = 0.0
-        self._depth_acc = 0.0
-        self._cutie_acc = 0.0
-        self._pose_acc = 0.0
 
     def _read_left_intrinsics_and_baseline(self) -> tuple[np.ndarray, float, float]:
         """读取左目内参 K、双目 baseline、左目 fx。"""
@@ -280,47 +315,56 @@ class RealSenseStereoPosePipeline:
         return cam_k, baseline_m, float(intr.fx)
 
     def start(self) -> None:
-        """启动 Pipeline：打开相机、读取标定、初始化 FoundationPose。"""
+        """启动 Pipeline：仅打开相机并重置运行状态。"""
         if self._started:
             return
 
         # 先启动相机流。
         self.camera.start()
 
-        # 从 RealSense 活跃 profile 获取真实标定参数。
-        self.cam_k, self.baseline_m, self.fx = self._read_left_intrinsics_and_baseline()
-        logging.info(
-            "[RealSenseCalib] fx=%.3f fy=%.3f cx=%.3f cy=%.3f baseline=%.6fm",
-            float(self.cam_k[0, 0]),
-            float(self.cam_k[1, 1]),
-            float(self.cam_k[0, 2]),
-            float(self.cam_k[1, 2]),
-            self.baseline_m,
-        )
-
-        # 初始化 FoundationPose 估计器。
-        cfg = FoundationPoseConfig(
-            mesh_path=_path_str(self.args.mesh_path),
-            cam_k=self.cam_k,
-            est_refine_iter=int(self.args.est_refine_iter),
-            track_refine_iter=int(self.args.track_refine_iter),
-            symmetry_tfs=self.symmetry_tfs,
-            debug=0,
-            debug_dir=None,
-        )
-        self.pose_estimator = FoundationPoseEstimator(cfg)
-
         # 重置运行统计。
         self._started = True
         self._has_pose = False
         self._cutie_initialized = False
+        if self.pose_estimator is not None:
+            self.pose_estimator.reset()
         self._frame_count = 0
         self._start_t = time.perf_counter()
         self._stats_t = self._start_t
+        self._last_frame_t = 0.0
+        self._fps_rt = 0.0
         self._yolo_acc = 0.0
         self._depth_acc = 0.0
         self._cutie_acc = 0.0
         self._pose_acc = 0.0
+
+    def _ensure_runtime_initialized(self) -> None:
+        """按需初始化运行时参数；首次 run 时完成相机参数与 PoseEstimator 构建。"""
+        if self.cam_k is None:
+            self.cam_k, self.baseline_m, self.fx = (
+                self._read_left_intrinsics_and_baseline()
+            )
+            logging.info(
+                "[RealSenseCalib] fx=%.3f fy=%.3f cx=%.3f cy=%.3f baseline=%.6fm",
+                float(self.cam_k[0, 0]),
+                float(self.cam_k[1, 1]),
+                float(self.cam_k[0, 2]),
+                float(self.cam_k[1, 2]),
+                self.baseline_m,
+            )
+
+        if self.pose_estimator is None:
+            if self.cam_k is None:
+                raise RuntimeError("相机内参 K 尚未初始化。")
+            self.pose_estimator = FoundationPoseEstimator(
+                mesh_path=str(self.args.mesh_path),
+                cam_k=self.cam_k,
+                est_refine_iter=int(self.args.est_refine_iter),
+                track_refine_iter=int(self.args.track_refine_iter),
+                symmetry_tfs=self.symmetry_tfs,
+                debug=0,
+                debug_dir=None,
+            )
 
     def stop(self) -> None:
         """停止 Pipeline：关闭相机并清理状态。"""
@@ -351,16 +395,16 @@ class RealSenseStereoPosePipeline:
 
         now = time.perf_counter()
         interval = max(now - self._stats_t, 1e-6)
-        proc_fps = self.stats_interval / interval
+        window_fps = self.stats_interval / interval
 
         logging.info(
-            "[stats] frames=%d stage=%d phase=%s total_fps=%.1f proc_fps=%.1f "
+            "[stats] frames=%d stage=%d phase=%s rt_fps=%.1f window_fps=%.1f "
             "avg(yolo/depth/cutie/pose)=%.1f/%.1f/%.1f/%.1fms depth_valid=%.1f%%",
             self._frame_count,
             self.stage,
             output.phase,
             output.fps,
-            proc_fps,
+            window_fps,
             self._yolo_acc / self.stats_interval,
             self._depth_acc / self.stats_interval,
             self._cutie_acc / self.stats_interval,
@@ -388,13 +432,24 @@ class RealSenseStereoPosePipeline:
         """
         if not self._started:
             raise RuntimeError("Pipeline 尚未启动，请先调用 start()。")
+
+        # 首次 run 时在这里完成相机参数与 PoseEstimator 的懒初始化。
+        self._ensure_runtime_initialized()
         if self.pose_estimator is None:
             raise RuntimeError("pose_estimator 尚未初始化。")
 
-        # 读取一帧左右图，并统一为 BGR。
+        # 读取一帧左右图，并在本地直接完成灰度转 BGR。
         stereo = self.camera.get_stereo_frames()
-        left_bgr = _to_bgr(stereo.left)
-        right_bgr = _to_bgr(stereo.right)
+        left_bgr = (
+            cv2.cvtColor(stereo.left, cv2.COLOR_GRAY2BGR)
+            if stereo.left.ndim == 2
+            else stereo.left[..., :3]
+        )
+        right_bgr = (
+            cv2.cvtColor(stereo.right, cv2.COLOR_GRAY2BGR)
+            if stereo.right.ndim == 2
+            else stereo.right[..., :3]
+        )
 
         # 默认占位数据，确保每个阶段都可以安全返回输出结构。
         timing = PipelineStepTiming()
@@ -521,9 +576,18 @@ class RealSenseStereoPosePipeline:
             self._cutie_acc += timing.cutie_ms
 
         # 更新帧统计。
+        now = time.perf_counter()
         self._frame_count += 1
-        elapsed = max(time.perf_counter() - self._start_t, 1e-6)
-        fps = self._frame_count / elapsed
+        if self._last_frame_t > 0.0:
+            dt = max(now - self._last_frame_t, 1e-6)
+            inst_fps = 1.0 / dt
+            self._fps_rt = (
+                inst_fps
+                if self._fps_rt <= 0.0
+                else (self._fps_rt * 0.85 + inst_fps * 0.15)
+            )
+        fps = self._fps_rt if self._fps_rt > 0.0 else 0.0
+        self._last_frame_t = now
         depth_valid_ratio = float((depth_m > 0).mean()) if self.stage >= 3 else 0.0
 
         # 如需调试图像，则在 API 返回结构中附带，不在 run 内显示。
@@ -532,23 +596,17 @@ class RealSenseStereoPosePipeline:
             depth_vis_bgr = _colorize_depth(depth_m, self.min_depth, self.max_depth)
             stereo_vis_bgr = np.hstack((left_bgr, right_bgr))
 
-            _draw_text(
+            # 首行固定展示 fps，其他信息按短行显示，避免窗口文本溢出。
+            _draw_hud(
                 vis_bgr,
-                f"{phase} | fps={fps:.1f} | stage={self.stage} | det={det_count}",
-                12,
-                28,
+                [
+                    f"fps={fps:.1f} | stage={self.stage} | phase={phase}",
+                    f"det={det_count} | depth_valid={depth_valid_ratio:.1%}",
+                    f"yolo={timing.yolo_ms:.1f}ms | depth={timing.depth_ms:.1f}ms",
+                    f"cutie={timing.cutie_ms:.1f}ms | pose={timing.pose_ms:.1f}ms",
+                ],
             )
-            _draw_text(
-                vis_bgr,
-                (
-                    f"yolo={timing.yolo_ms:.1f}ms depth={timing.depth_ms:.1f}ms "
-                    f"cutie={timing.cutie_ms:.1f}ms pose={timing.pose_ms:.1f}ms "
-                    f"depth_valid={depth_valid_ratio:.1%}"
-                ),
-                12,
-                54,
-            )
-            _draw_text(stereo_vis_bgr, f"timestamp={stereo.timestamp_ms:.1f}ms", 12, 28)
+            _draw_hud(stereo_vis_bgr, f"timestamp={stereo.timestamp_ms:.1f}ms")
 
             debug_data = PipelineDebugData(
                 vis_bgr=vis_bgr,
@@ -654,8 +712,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return build_arg_parser().parse_args(argv)
 
 
-def validate_paths(args: argparse.Namespace) -> None:
-    """检查关键路径是否存在，避免运行中途失败。"""
+def build_realsense_pipeline(args: argparse.Namespace) -> RealSenseStereoPosePipeline:
+    """构建 RealSense Pipeline 对象（API 工厂函数）。"""
     required_paths = [
         args.yolo_model_path,
         args.mobileclip2_path,
@@ -666,11 +724,6 @@ def validate_paths(args: argparse.Namespace) -> None:
         if not Path(path).exists():
             raise FileNotFoundError(f"必要文件不存在: {path}")
 
-
-def build_realsense_pipeline(args: argparse.Namespace) -> RealSenseStereoPosePipeline:
-    """构建 RealSense Pipeline 对象（API 工厂函数）。"""
-    validate_paths(args)
-
     camera = RealSenseCamera(
         width=int(args.width),
         height=int(args.height),
@@ -679,35 +732,29 @@ def build_realsense_pipeline(args: argparse.Namespace) -> RealSenseStereoPosePip
     )
 
     yolo = Yoloe26Masker(
-        Yoloe26Config(
-            model_path=_path_str(args.yolo_model_path),
-            conf=float(args.yolo_conf),
-            imgsz=int(args.yolo_imgsz),
-            max_det=int(args.yolo_max_det),
-            mask_threshold=float(args.yolo_mask_threshold),
-            use_half=False,
-            device=None,
-            mobileclip2_path=_path_str(args.mobileclip2_path),
-        ),
+        model_path=str(args.yolo_model_path),
         init_prompt=args.yolo_prompt,
+        conf=float(args.yolo_conf),
+        imgsz=int(args.yolo_imgsz),
+        max_det=int(args.yolo_max_det),
+        mask_threshold=float(args.yolo_mask_threshold),
+        use_half=False,
+        device=None,
+        mobileclip2_path=str(args.mobileclip2_path),
     )
 
     ffs = FastFoundationStereoRealtime(
-        FastFoundationStereoConfig(
-            model_dir=_path_str(args.ffs_model_path),
-            device=str(args.ffs_device),
-            scale=float(args.ffs_scale),
-            valid_iters=int(args.ffs_valid_iters),
-            max_disp=int(args.ffs_max_disp),
-            optimize_build_volume=str(args.ffs_optimize_build_volume),
-        )
+        model_dir=str(args.ffs_model_path),
+        device=str(args.ffs_device),
+        scale=float(args.ffs_scale),
+        valid_iters=int(args.ffs_valid_iters),
+        max_disp=int(args.ffs_max_disp),
+        optimize_build_volume=str(args.ffs_optimize_build_volume),
     )
 
-    use_2d_tracker = _bool_flag(args.activate_2d_tracker)
+    use_2d_tracker = bool(args.activate_2d_tracker)
     cutie_tracker = (
-        CutieTracker(
-            CutieConfig(seg_threshold=0.1, erosion_size=int(args.cutie_erosion_size))
-        )
+        CutieTracker(seg_threshold=0.1, erosion_size=int(args.cutie_erosion_size))
         if use_2d_tracker
         else None
     )

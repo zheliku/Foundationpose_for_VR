@@ -13,7 +13,6 @@ from __future__ import annotations
 import importlib
 import logging
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -22,70 +21,98 @@ import numpy as np
 import trimesh
 
 
-@dataclass
-class FoundationPoseConfig:
-    """FoundationPose 初始化配置。"""
-
-    # 目标物体网格模型路径（.obj/.ply/.stl 等）。
-    mesh_path: str
-
-    # 相机内参矩阵，shape=(3,3)。
-    cam_k: np.ndarray
-
-    # 初始阶段 refine 迭代次数（register）。
-    est_refine_iter: int = 10
-
-    # 跟踪阶段 refine 迭代次数（track）。
-    track_refine_iter: int = 5
-
-    # 模型缩放因子（例如厘米模型可设 0.01 转米）。
-    apply_scale: float = 1.0
-
-    # 对无纹理/无颜色模型强制上色。
-    force_apply_color: bool = False
-
-    # 强制上色 RGB。
-    apply_color: list[int] | None = None
-
-    # 对称变换（可选），shape=(N,4,4)。
-    symmetry_tfs: np.ndarray | None = None
-
-    # 调试开关与调试目录。
-    debug: int = 0
-    debug_dir: str | None = None
-
-
 class FoundationPoseEstimator:
     """FoundationPose 估计器：支持 register + track。"""
 
-    def __init__(self, config: FoundationPoseConfig) -> None:
-        self.cfg = config
+    # 输入配置。
+    mesh_path: str = ""  # 目标 mesh 路径。
+    est_refine_iter: int = 10  # register 阶段迭代次数。
+    track_refine_iter: int = 5  # track 阶段迭代次数。
+    apply_scale: float = 1.0  # mesh 缩放比例。
+    force_apply_color: bool = False  # 是否强制给 mesh 上纯色。
+    apply_color: list[int] | None = None  # 纯色 RGB（可选）。
+    symmetry_tfs: np.ndarray | None = None  # 对称变换集合（可选）。
+    debug: int = 0  # 调试等级。
+    debug_dir: str | None = None  # 调试输出目录。
+    cam_k: np.ndarray  # 相机内参 K（__init__ 中归一化后固定）。
+
+    # 路径与动态导入符号。
+    foundationpose_root: Path | None = None  # FoundationPose 根目录。
+    ScorePredictor: Any = None  # 评分网络类。
+    PoseRefinePredictor: Any = None  # 位姿精修网络类。
+    dr: Any = None  # 渲染上下文模块。
+    FoundationPose: Any = None  # FoundationPose 主类。
+    trimesh_add_pure_colored_texture: Any = None  # mesh 纯色贴图函数。
+    draw_posed_3d_box: Any = None  # 3D 包围盒绘制函数。
+    draw_xyz_axis: Any = None  # 坐标轴绘制函数。
+
+    # 运行时对象与状态。
+    mesh: Any = None  # 预处理后的 mesh。
+    to_origin: np.ndarray  # mesh 到中心坐标的变换（__init__ 中计算）。
+    bbox: np.ndarray  # 目标包围盒（__init__ 中计算）。
+    estimator: Any  # FoundationPose 实例（__init__ 中创建）。
+    _initialized: bool = False  # 是否完成首帧注册。
+
+    def __init__(
+        self,
+        mesh_path: str,
+        cam_k: np.ndarray,
+        est_refine_iter: int = 10,
+        track_refine_iter: int = 5,
+        apply_scale: float = 1.0,
+        force_apply_color: bool = False,
+        apply_color: list[int] | None = None,
+        symmetry_tfs: np.ndarray | None = None,
+        debug: int = 0,
+        debug_dir: str | None = None,
+    ) -> None:
+        """
+        初始化 FoundationPose 估计器。
+
+        参数：
+        - mesh_path: 目标 mesh 路径。
+        - cam_k: 相机内参矩阵。
+        - est_refine_iter: register 阶段迭代次数。
+        - track_refine_iter: track 阶段迭代次数。
+        - apply_scale: mesh 缩放比例。
+        - force_apply_color/apply_color: 纯色贴图配置。
+        - symmetry_tfs: 对称变换集合。
+        - debug/debug_dir: 调试级别与输出目录。
+
+        初始化流程：
+        1. 保存配置并标准化相机内参。
+        2. 配置工程路径并动态导入 FoundationPose 符号。
+        3. 加载并预处理 mesh。
+        4. 构建 FoundationPose 推理实例。
+        """
+        self.mesh_path = str(mesh_path)
+        self.est_refine_iter = int(est_refine_iter)
+        self.track_refine_iter = int(track_refine_iter)
+        self.apply_scale = float(apply_scale)
+        self.force_apply_color = bool(force_apply_color)
+        self.apply_color = apply_color
+        self.symmetry_tfs = symmetry_tfs
+        self.debug = int(debug)
+        self.debug_dir = debug_dir
 
         # 标准化并缓存相机内参，后续每帧直接复用。
         # 这里使用 float64：FoundationPose 内部部分几何流程会把 mesh 顶点处理为 double，
         # 若 K 为 float32，注册阶段在矩阵乘法处会触发 float/double dtype 冲突。
-        self.cam_k = np.asarray(self.cfg.cam_k, dtype=np.float64).reshape(3, 3)
+        self.cam_k = np.asarray(cam_k, dtype=np.float64).reshape(3, 3)
 
         # 默认颜色配置。
-        if self.cfg.apply_color is None:
-            self.cfg.apply_color = [0, 159, 237]
+        if self.apply_color is None:
+            self.apply_color = [0, 159, 237]
 
         # 补充项目路径，确保可导入 FoundationPose 包。
-        self.project_root = Path(__file__).resolve().parents[2]
-        self.foundationpose_root = self.project_root / "FoundationPose"
-        if str(self.project_root) not in sys.path:
-            sys.path.append(str(self.project_root))
+        project_root = Path(__file__).resolve().parents[2]
+        self.foundationpose_root = project_root / "FoundationPose"
+        if str(project_root) not in sys.path:
+            sys.path.append(str(project_root))
         if str(self.foundationpose_root) not in sys.path:
             sys.path.append(str(self.foundationpose_root))
 
-        # 动态导入 FoundationPose 模块，避免静态路径问题。
-        # 兼容两种运行方式：
-        # 1) 作为包导入 FoundationPose.estimater
-        # 2) 直接把 FoundationPose 目录加入 sys.path 后导入 estimater
-        #
-        # 关键：FoundationPose 与 Fast-FoundationStereo 都有顶层同名 `Utils`。
-        # 若先初始化 FFS，再初始化 FoundationPose，`from Utils import *` 可能错误命中 FFS 的 Utils，
-        # 导致 compute_mesh_diameter 等符号缺失。这里临时把 `Utils` 绑定到 FoundationPose.Utils。
+        # 动态导入 FoundationPose；并临时绑定 Utils，避免与 FFS 的同名模块冲突。
         try:
             utils_mod = importlib.import_module("FoundationPose.Utils")
         except ModuleNotFoundError:
@@ -123,18 +150,18 @@ class FoundationPoseEstimator:
         self.draw_xyz_axis = _resolve_symbol("draw_xyz_axis")
 
         # 加载并预处理 mesh。
-        loaded_mesh = trimesh.load(self.cfg.mesh_path)
+        loaded_mesh = trimesh.load(self.mesh_path)
         if isinstance(loaded_mesh, trimesh.Scene):
             loaded_mesh = loaded_mesh.dump(concatenate=True)
         # trimesh 在静态类型上较宽泛，这里转 Any 以便后续直接访问 vertices 等属性。
         self.mesh = cast(Any, loaded_mesh)
 
-        self.mesh.apply_scale(float(self.cfg.apply_scale))
+        self.mesh.apply_scale(float(self.apply_scale))
 
-        if bool(self.cfg.force_apply_color):
+        if bool(self.force_apply_color):
             self.mesh = self.trimesh_add_pure_colored_texture(
                 self.mesh,
-                color=np.array(self.cfg.apply_color),
+                color=np.array(self.apply_color),
                 resolution=10,
             )
 
@@ -144,7 +171,7 @@ class FoundationPoseEstimator:
 
         # FoundationPose 内部会对 debug_dir 调用 os.makedirs。
         # 因此这里必须保证传入的是有效字符串路径，不能为 None。
-        effective_debug_dir = self.cfg.debug_dir
+        effective_debug_dir = self.debug_dir
         if effective_debug_dir is None or str(effective_debug_dir).strip() == "":
             effective_debug_dir = str(self.foundationpose_root / "debug" / "api")
 
@@ -156,17 +183,14 @@ class FoundationPoseEstimator:
         self.estimator = self.FoundationPose(
             model_pts=self.mesh.vertices,
             model_normals=self.mesh.vertex_normals,
-            symmetry_tfs=self.cfg.symmetry_tfs,
+            symmetry_tfs=self.symmetry_tfs,
             mesh=self.mesh,
             scorer=scorer,
             refiner=refiner,
             glctx=glctx,
             debug_dir=effective_debug_dir,
-            debug=int(self.cfg.debug),
+            debug=int(self.debug),
         )
-
-        # 是否已完成初次注册。
-        self._initialized = False
 
         logging.info("FoundationPose estimator initialization done")
 
@@ -263,7 +287,7 @@ class FoundationPoseEstimator:
             rgb=rgb,
             depth=depth,
             ob_mask=mask_u8,
-            iteration=int(self.cfg.est_refine_iter),
+            iteration=int(self.est_refine_iter),
         )
 
         self._initialized = True
@@ -287,7 +311,7 @@ class FoundationPoseEstimator:
             rgb=rgb,
             depth=depth,
             K=self.cam_k,
-            iteration=int(self.cfg.track_refine_iter),
+            iteration=int(self.track_refine_iter),
         )
         return np.asarray(pose).reshape(4, 4)
 
@@ -378,7 +402,7 @@ if __name__ == "__main__":
         video_dir=str(demo_dir), shorter_side=None, zfar=np.inf
     )
 
-    cfg = FoundationPoseConfig(
+    fp = FoundationPoseEstimator(
         mesh_path=str(demo_dir / "mesh" / "textured_simple.obj"),
         cam_k=np.asarray(reader.K),
         est_refine_iter=5,
@@ -388,8 +412,6 @@ if __name__ == "__main__":
         debug=0,
         debug_dir=str(foundationpose_root / "debug"),
     )
-
-    fp = FoundationPoseEstimator(cfg)
 
     print("FoundationPose demo running, press q/ESC to quit.")
 

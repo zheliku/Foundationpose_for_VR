@@ -76,6 +76,20 @@ class RealSenseCamera:
     - `stop()` 可重复调用（幂等），方便在异常处理中安全清理。
     """
 
+    # 输入配置。
+    width: int = 640  # 采集宽度。
+    height: int = 480  # 采集高度。
+    fps: int = 30  # 采集帧率。
+    serial_number: str | None = None  # 可选设备序列号。
+
+    # 运行时对象。
+    pipeline: Any = None  # RealSense pipeline 对象。
+    config: Any = None  # RealSense 配置对象。
+    _align_to_color: Any = None  # depth->color 对齐器。
+
+    # 运行状态标记。
+    _started: bool = False  # 是否已启动数据流。
+
     def __init__(
         self,
         width: int = 640,
@@ -84,11 +98,18 @@ class RealSenseCamera:
         serial_number: str | None = None,
     ) -> None:
         """
-        初始化参数（不立即启动相机）。
+        初始化 RealSense 相机对象（不立即启动）。
 
-        参数说明：
-        - width/height/fps：常规相机输入参数，控制采集分辨率与帧率。
-        - serial_number：可选，相机序列号；多相机场景下建议明确指定。
+        参数：
+        - width: 采集宽度。
+        - height: 采集高度。
+        - fps: 采集帧率。
+        - serial_number: 可选设备序列号。
+
+        初始化流程：
+        1. 检查 pyrealsense2 环境是否可用。
+        2. 保存采集参数。
+        3. 运行时对象保持默认占位，等待 start() 创建。
         """
         # 环境检查放在实例化阶段执行，错误更可读。
         if rs is None:
@@ -101,15 +122,6 @@ class RealSenseCamera:
         self.height = int(height)
         self.fps = int(fps)
         self.serial_number = serial_number
-
-        # RealSense 运行时对象在 start() 时创建。
-        # 这里使用公有属性，便于外部模块在必要时直接访问。
-        self.pipeline: Any = None
-        self.config: Any = None
-        self._align_to_color: Any = None
-
-        # 运行状态标记，避免重复启动或未启动取帧。
-        self._started = False
 
     def start(self) -> None:
         """

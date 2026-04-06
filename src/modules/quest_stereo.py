@@ -68,6 +68,28 @@ class QuestStereoCamera:
     - `stop()` 可重复调用（幂等）。
     """
 
+    # 输入配置。
+    listen_host: str = "*"  # 监听地址。
+    listen_port: int = 5557  # 监听端口。
+    hwm: int = 1  # ZMQ 高水位。
+    timeout_ms: int = 100  # 默认接收超时（毫秒）。
+    endpoint: str = ""  # 完整 ZMQ endpoint。
+
+    # 运行时对象。
+    receiver: PayloadReceiver | None = None  # 负载接收器。
+    decoder: StereoJpegDecoder  # 双目 JPEG 解码器（__init__ 中创建）。
+
+    # 运行状态标志。
+    _started: bool = False  # 是否已经启动接收。
+    _has_logged_payload_format: bool = False  # 是否已打印过负载格式日志。
+
+    # 统计计数器。
+    _received_count: int = 0  # 收到 payload 次数。
+    _decoded_count: int = 0  # 成功解码次数。
+    _decode_fail_count: int = 0  # 解码失败次数。
+    _drained_count: int = 0  # 队列清空累计数量。
+    _decode_time_acc_ms: float = 0.0  # 累计解码耗时（毫秒）。
+
     def __init__(
         self,
         listen_host: str = "*",
@@ -75,6 +97,20 @@ class QuestStereoCamera:
         hwm: int = 1,
         timeout_ms: int = 100,
     ) -> None:
+        """
+        初始化 Quest 双目接收器。
+
+        参数：
+        - listen_host: 监听地址。
+        - listen_port: 监听端口。
+        - hwm: ZMQ 高水位。
+        - timeout_ms: 默认接收超时（毫秒）。
+
+        初始化流程：
+        1. 保存网络参数。
+        2. 生成 endpoint。
+        3. 创建双目 JPEG 解码器。
+        """
         self.listen_host = str(listen_host)
         self.listen_port = int(listen_port)
         self.hwm = int(hwm)
@@ -82,17 +118,7 @@ class QuestStereoCamera:
 
         self.endpoint = f"tcp://{self.listen_host}:{self.listen_port}"
 
-        self.receiver: PayloadReceiver | None = None
         self.decoder = StereoJpegDecoder()
-
-        self._started = False
-        self._has_logged_payload_format = False
-
-        self._received_count = 0
-        self._decoded_count = 0
-        self._decode_fail_count = 0
-        self._drained_count = 0
-        self._decode_time_acc_ms = 0.0
 
     def start(self) -> None:
         """启动网络接收器。"""

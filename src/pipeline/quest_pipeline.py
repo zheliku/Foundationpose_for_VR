@@ -9,7 +9,6 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import cv2
 import numpy as np
@@ -21,16 +20,13 @@ if __package__ is None or __package__ == "":
         sys.path.append(str(SRC_DIR))
 
 from modules import (  # noqa: E402
-    FastFoundationStereoConfig,
     FastFoundationStereoRealtime,
-    FoundationPoseConfig,
     FoundationPoseEstimator,
     QuestStereoCamera,
     QuestStereoFrame,
-    Yoloe26Config,
     Yoloe26Masker,
 )
-from modules.cutie import CutieConfig, CutieTracker  # noqa: E402
+from modules.cutie import CutieTracker  # noqa: E402
 
 THIS_FILE = Path(__file__).resolve()
 SRC_DIR = THIS_FILE.parent.parent
@@ -147,35 +143,59 @@ class PosePipelineOutput:
 # =========================
 
 
-def _to_bgr(gray_or_bgr: np.ndarray) -> np.ndarray:
-    """把输入图像统一成 BGR 三通道。"""
-    if gray_or_bgr.ndim == 2:
-        return cv2.cvtColor(gray_or_bgr, cv2.COLOR_GRAY2BGR)
-    return gray_or_bgr[..., :3]
+def _draw_hud(
+    img: np.ndarray,
+    lines: str | list[str],
+    x: int = 12,
+    y: int = 28,
+    line_gap: int = 24,
+) -> None:
+    """统一绘制 HUD 文本并按图像宽度自适应换行。"""
+    max_chars = max((img.shape[1] - x - 12) // 9, 12)
+    wrapped: list[str] = []
 
+    line_list = [lines] if isinstance(lines, str) else lines
 
-def _draw_text(img: np.ndarray, text: str, x: int, y: int) -> None:
-    """统一文本绘制样式，便于在高亮和暗部都可读。"""
-    cv2.putText(
-        img,
-        text,
-        (x, y),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.58,
-        (15, 15, 15),
-        2,
-        cv2.LINE_AA,
-    )
-    cv2.putText(
-        img,
-        text,
-        (x, y),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.58,
-        (245, 245, 245),
-        1,
-        cv2.LINE_AA,
-    )
+    for line in line_list:
+        if len(line) <= max_chars:
+            wrapped.append(line)
+            continue
+
+        words = line.split(" ")
+        current = ""
+        for word in words:
+            candidate = f"{current} {word}".strip()
+            if len(candidate) <= max_chars:
+                current = candidate
+            else:
+                if current:
+                    wrapped.append(current)
+                current = word
+        if current:
+            wrapped.append(current)
+
+    for idx, line in enumerate(wrapped):
+        yy = y + idx * line_gap
+        cv2.putText(
+            img,
+            line,
+            (x, yy),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.58,
+            (15, 15, 15),
+            2,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            img,
+            line,
+            (x, yy),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.58,
+            (245, 245, 245),
+            1,
+            cv2.LINE_AA,
+        )
 
 
 def _colorize_depth(
@@ -217,16 +237,6 @@ def _generate_cube_symmetry_tfs() -> np.ndarray:
     return np.stack(out, axis=0)
 
 
-def _bool_flag(flag: int | bool) -> bool:
-    """统一处理 int/bool 风格开关参数。"""
-    return bool(int(flag)) if isinstance(flag, (int, np.integer)) else bool(flag)
-
-
-def _path_str(path: Any) -> str:
-    """把 Path/其他路径对象统一转成字符串。"""
-    return str(path)
-
-
 # =========================
 # Quest Pipeline 实现
 # =========================
@@ -237,7 +247,7 @@ class QuestStereoPosePipeline:
     Quest 位姿 Pipeline（结构化独立实现）。
 
     说明：
-    1. `start()`：启动网络接收、读取标定并初始化模型。
+    1. `start()`：仅启动网络接收并重置运行状态。
     2. `run()`：处理一帧并返回 `PosePipelineOutput`。
     3. `stop()`：释放接收器资源。
 
@@ -249,6 +259,43 @@ class QuestStereoPosePipeline:
     - `PosePipelineOutput`，核心是 `pose_4x4`（可直接用于网络回传）。
     """
 
+    # 依赖注入。
+    args: argparse.Namespace  # 命令行/配置参数集合。
+    camera: QuestStereoCamera  # Quest 双目输入源。
+    yolo: Yoloe26Masker  # 2D 分割模块。
+    ffs: FastFoundationStereoRealtime  # 双目深度模块。
+    cutie_tracker: CutieTracker | None  # 可选 2D 跟踪模块。
+
+    # 运行期对象与标定状态。
+    pose_estimator: FoundationPoseEstimator | None = None  # FoundationPose 估计器。
+    calib: StereoCalibration | None = None  # Quest 标定参数。
+    cam_k: np.ndarray | None = None  # 映射到运行分辨率后的相机内参 K。
+    fx: float = 0.0  # 当前帧使用的焦距 fx。
+    frame_w: int = 0  # 运行分辨率宽度。
+    frame_h: int = 0  # 运行分辨率高度。
+    # 可配置运行参数。
+    symmetry_tfs: np.ndarray | None = None  # 对称变换集合。
+    min_depth: float = 0.1  # 最小有效深度（米）。
+    max_depth: float = 3.0  # 最大有效深度（米）。
+    stats_interval: int = 30  # 统计日志输出间隔（帧）。
+
+    # 流程状态标志。
+    stage: int = 4  # 当前处理阶段（1..4）。
+    _started: bool = False  # Pipeline 是否已启动。
+    _has_pose: bool = False  # 是否已完成首次注册并进入跟踪。
+    _cutie_initialized: bool = False  # Cutie 是否已初始化。
+
+    # 性能统计累加器。
+    _frame_count: int = 0  # 已处理帧数。
+    _start_t: float = 0.0  # 整体统计起始时间。
+    _stats_t: float = 0.0  # 上次统计打印时间。
+    _last_frame_t: float = 0.0  # 上一帧完成时间（用于实时 FPS）。
+    _fps_rt: float = 0.0  # 平滑后的实时 FPS。
+    _yolo_acc: float = 0.0  # 累计 YOLO 耗时（毫秒）。
+    _depth_acc: float = 0.0  # 累计深度估计耗时（毫秒）。
+    _cutie_acc: float = 0.0  # 累计 Cutie 耗时（毫秒）。
+    _pose_acc: float = 0.0  # 累计位姿估计耗时（毫秒）。
+
     def __init__(
         self,
         args: argparse.Namespace,
@@ -257,24 +304,27 @@ class QuestStereoPosePipeline:
         ffs: FastFoundationStereoRealtime,
         cutie_tracker: CutieTracker | None,
     ) -> None:
+        """
+        初始化 Quest 位姿 Pipeline。
+
+        参数：
+        - args: 命令行与运行配置。
+        - camera: Quest 双目输入模块。
+        - yolo: 2D 分割模块。
+        - ffs: 双目深度模块。
+        - cutie_tracker: 可选 2D 跟踪模块。
+
+        初始化流程：
+        1. 绑定外部依赖对象。
+        2. 读取对称性与深度阈值配置。
+        3. 读取标定并计算运行内参 K。
+        4. 创建 FoundationPose 估计器。
+        """
         self.args = args
         self.camera = camera
         self.yolo = yolo
         self.ffs = ffs
         self.cutie_tracker = cutie_tracker
-
-        # FoundationPose 在拿到映射后的 K 后初始化。
-        self.pose_estimator: FoundationPoseEstimator | None = None
-
-        # 标定与运行分辨率状态。
-        self.calib: StereoCalibration | None = None
-        self.cam_k: np.ndarray | None = None
-        self.fx = 0.0
-        self.frame_w = 0
-        self.frame_h = 0
-
-        # 启动阶段保存首帧，避免首帧丢失。
-        self._pending_frame: QuestStereoFrame | None = None
 
         # 对称约束预先缓存，避免循环内重复计算。
         self.symmetry_tfs = (
@@ -286,34 +336,69 @@ class QuestStereoPosePipeline:
         self.max_depth = float(args.max_depth)
         self.stats_interval = max(int(args.stats_interval), 1)
 
-        # 运行阶段：
-        # 1=仅输入、2=+YOLO、3=+深度、4=+位姿。
-        self.stage = 4
+        # 标定文件在构建阶段读入一次，后续不再变化。
+        self.calib = self._load_calibration(Path(self.args.calib_dir))
+        logging.info(
+            "[QuestCalib] fx=%.3f fy=%.3f cx=%.3f cy=%.3f baseline=%.6fm calib=%dx%d",
+            self.calib.left_fx,
+            self.calib.left_fy,
+            self.calib.left_cx,
+            self.calib.left_cy,
+            self.calib.baseline_m,
+            self.calib.calib_width,
+            self.calib.calib_height,
+        )
 
-        # 运行状态位。
-        self._started = False
-        self._has_pose = False
-        self._cutie_initialized = False
+        # 相机参数固定，因此在 __init__ 一次性完成 K 与 PoseEstimator 初始化。
+        self.frame_w = max(int(self.args.process_width), 0)
+        self.frame_h = max(int(self.args.process_height), 0)
+        if self.frame_w <= 0 or self.frame_h <= 0:
+            self.frame_w = int(self.calib.calib_width)
+            self.frame_h = int(self.calib.calib_height)
 
-        # 统计累加器。
-        self._frame_count = 0
-        self._start_t = 0.0
-        self._stats_t = 0.0
-        self._yolo_acc = 0.0
-        self._depth_acc = 0.0
-        self._cutie_acc = 0.0
-        self._pose_acc = 0.0
+        self.cam_k = self.calib.scaled_k(
+            width=self.frame_w,
+            height=self.frame_h,
+            assume_center_crop=bool(self.args.calib_assume_center_crop),
+        )
+        self.fx = float(self.cam_k[0, 0])
 
-    @staticmethod
-    def _read_json(path: Path) -> dict:
-        """读取 UTF-8 JSON。"""
-        with path.open("r", encoding="utf-8") as f:
-            return json.load(f)
+        logging.info(
+            "[KMap] mode=%s fx=%.2f fy=%.2f cx=%.2f cy=%.2f frame=%dx%d",
+            (
+                "center-crop+scale"
+                if bool(self.args.calib_assume_center_crop)
+                else "linear-scale-only"
+            ),
+            float(self.cam_k[0, 0]),
+            float(self.cam_k[1, 1]),
+            float(self.cam_k[0, 2]),
+            float(self.cam_k[1, 2]),
+            self.frame_w,
+            self.frame_h,
+        )
+
+        self.pose_estimator = FoundationPoseEstimator(
+            mesh_path=str(self.args.mesh_path),
+            cam_k=self.cam_k,
+            est_refine_iter=int(self.args.est_refine_iter),
+            track_refine_iter=int(self.args.track_refine_iter),
+            symmetry_tfs=self.symmetry_tfs,
+            debug=0,
+            debug_dir=None,
+        )
 
     def _load_calibration(self, calib_dir: Path) -> StereoCalibration:
         """加载 Quest 左右相机标定并计算 baseline。"""
-        left = self._read_json(calib_dir / "left_camera_characteristics.json")
-        right = self._read_json(calib_dir / "right_camera_characteristics.json")
+        # 直接读取 JSON，避免对简单逻辑再封装一层方法。
+        with (calib_dir / "left_camera_characteristics.json").open(
+            "r", encoding="utf-8"
+        ) as left_file:
+            left = json.load(left_file)
+        with (calib_dir / "right_camera_characteristics.json").open(
+            "r", encoding="utf-8"
+        ) as right_file:
+            right = json.load(right_file)
 
         left_intr = left["intrinsics"]
         left_t = np.array(left["pose"]["translation"], dtype=np.float64)
@@ -343,8 +428,17 @@ class QuestStereoPosePipeline:
         target_height: int,
     ) -> tuple[np.ndarray, np.ndarray]:
         """把双目图统一到同分辨率与 BGR 格式。"""
-        left_bgr = _to_bgr(left_raw)
-        right_bgr = _to_bgr(right_raw)
+        # 直接在方法内完成灰度转 BGR，避免额外包装函数。
+        left_bgr = (
+            cv2.cvtColor(left_raw, cv2.COLOR_GRAY2BGR)
+            if left_raw.ndim == 2
+            else left_raw[..., :3]
+        )
+        right_bgr = (
+            cv2.cvtColor(right_raw, cv2.COLOR_GRAY2BGR)
+            if right_raw.ndim == 2
+            else right_raw[..., :3]
+        )
 
         # 若左右尺寸不一致，先取共同最小尺寸对齐。
         if left_bgr.shape[:2] != right_bgr.shape[:2]:
@@ -377,95 +471,25 @@ class QuestStereoPosePipeline:
 
         return left_bgr, right_bgr
 
-    def _wait_first_frame(self, timeout_ms: int) -> QuestStereoFrame:
-        """等待 Quest 首帧，避免在未收到数据时继续初始化。"""
-        start = time.perf_counter()
-        timeout_s = max(float(timeout_ms) / 1000.0, 0.1)
-
-        while (time.perf_counter() - start) < timeout_s:
-            frame = self.camera.get_stereo_frames(timeout_ms=100)
-            if frame is not None:
-                return frame
-
-        raise RuntimeError("等待 Quest 首帧超时，请检查 Unity 发送端是否已启动。")
-
     def start(self) -> None:
-        """启动 Pipeline：加载标定、启动接收、初始化 FoundationPose。"""
+        """启动 Pipeline：仅启动接收器并重置运行状态。"""
         if self._started:
             return
 
-        # 先读取标定文件，确保参数完整再启动流程。
-        self.calib = self._load_calibration(Path(self.args.calib_dir))
-        logging.info(
-            "[QuestCalib] fx=%.3f fy=%.3f cx=%.3f cy=%.3f baseline=%.6fm calib=%dx%d",
-            self.calib.left_fx,
-            self.calib.left_fy,
-            self.calib.left_cx,
-            self.calib.left_cy,
-            self.calib.baseline_m,
-            self.calib.calib_width,
-            self.calib.calib_height,
-        )
-
         # 启动网络接收器。
         self.camera.start()
-
-        # 读取首帧并完成分辨率/内参映射。
-        first = self._wait_first_frame(
-            timeout_ms=max(int(self.args.recv_timeout_ms) * 50, 5000)
-        )
-        left0, right0 = self._preprocess_stereo_pair(
-            first.left,
-            first.right,
-            target_width=max(int(self.args.process_width), 0),
-            target_height=max(int(self.args.process_height), 0),
-        )
-
-        self.frame_h, self.frame_w = left0.shape[:2]
-        self.cam_k = self.calib.scaled_k(
-            width=self.frame_w,
-            height=self.frame_h,
-            assume_center_crop=_bool_flag(self.args.calib_assume_center_crop),
-        )
-        self.fx = float(self.cam_k[0, 0])
-
-        logging.info(
-            "[KMap] mode=%s fx=%.2f fy=%.2f cx=%.2f cy=%.2f frame=%dx%d",
-            (
-                "center-crop+scale"
-                if _bool_flag(self.args.calib_assume_center_crop)
-                else "linear-scale-only"
-            ),
-            float(self.cam_k[0, 0]),
-            float(self.cam_k[1, 1]),
-            float(self.cam_k[0, 2]),
-            float(self.cam_k[1, 2]),
-            self.frame_w,
-            self.frame_h,
-        )
-
-        # 初始化 FoundationPose 估计器。
-        cfg = FoundationPoseConfig(
-            mesh_path=_path_str(self.args.mesh_path),
-            cam_k=self.cam_k,
-            est_refine_iter=int(self.args.est_refine_iter),
-            track_refine_iter=int(self.args.track_refine_iter),
-            symmetry_tfs=self.symmetry_tfs,
-            debug=0,
-            debug_dir=None,
-        )
-        self.pose_estimator = FoundationPoseEstimator(cfg)
-
-        # 保存首帧供 run() 首次处理。
-        self._pending_frame = first
 
         # 重置运行统计。
         self._started = True
         self._has_pose = False
         self._cutie_initialized = False
+        if self.pose_estimator is not None:
+            self.pose_estimator.reset()
         self._frame_count = 0
         self._start_t = time.perf_counter()
         self._stats_t = self._start_t
+        self._last_frame_t = 0.0
+        self._fps_rt = 0.0
         self._yolo_acc = 0.0
         self._depth_acc = 0.0
         self._cutie_acc = 0.0
@@ -500,19 +524,19 @@ class QuestStereoPosePipeline:
 
         now = time.perf_counter()
         interval = max(now - self._stats_t, 1e-6)
-        proc_fps = self.stats_interval / interval
+        window_fps = self.stats_interval / interval
 
         q_stats = self.camera.get_stats()
 
         logging.info(
-            "[stats] frames=%d stage=%d phase=%s total_fps=%.1f proc_fps=%.1f "
+            "[stats] frames=%d stage=%d phase=%s rt_fps=%.1f window_fps=%.1f "
             "avg(yolo/depth/cutie/pose)=%.1f/%.1f/%.1f/%.1fms depth_valid=%.1f%% "
             "recv=%s decode_fail=%s drained=%s",
             self._frame_count,
             self.stage,
             output.phase,
             output.fps,
-            proc_fps,
+            window_fps,
             self._yolo_acc / self.stats_interval,
             self._depth_acc / self.stats_interval,
             self._cutie_acc / self.stats_interval,
@@ -543,29 +567,26 @@ class QuestStereoPosePipeline:
         """
         if not self._started:
             raise RuntimeError("Pipeline 尚未启动，请先调用 start()。")
-        if self.pose_estimator is None:
-            raise RuntimeError("pose_estimator 尚未初始化。")
-        if self.calib is None:
-            raise RuntimeError("标定信息尚未初始化。")
 
-        # 读取一帧；优先消费 start() 保存的首帧。
-        if self._pending_frame is not None:
-            stereo = self._pending_frame
-            self._pending_frame = None
-        else:
-            stereo = self.camera.get_stereo_frames()
+        # 读取一帧网络双目图。
+        stereo = self.camera.get_stereo_frames()
 
         # Quest 接收可能超时，此时返回 None，让上层继续轮询。
         if stereo is None:
             return None
 
-        # 统一双目图格式与分辨率。
+        # K 在 __init__ 已固定，这里直接按目标分辨率处理双目图。
         left_bgr, right_bgr = self._preprocess_stereo_pair(
             stereo.left,
             stereo.right,
             target_width=self.frame_w,
             target_height=self.frame_h,
         )
+
+        if self.pose_estimator is None:
+            raise RuntimeError("pose_estimator 尚未初始化。")
+        if self.calib is None:
+            raise RuntimeError("标定信息尚未初始化。")
 
         # 默认占位数据，确保每个阶段都可以安全返回输出结构。
         timing = PipelineStepTiming()
@@ -692,9 +713,18 @@ class QuestStereoPosePipeline:
             self._cutie_acc += timing.cutie_ms
 
         # 更新帧统计。
+        now = time.perf_counter()
         self._frame_count += 1
-        elapsed = max(time.perf_counter() - self._start_t, 1e-6)
-        fps = self._frame_count / elapsed
+        if self._last_frame_t > 0.0:
+            dt = max(now - self._last_frame_t, 1e-6)
+            inst_fps = 1.0 / dt
+            self._fps_rt = (
+                inst_fps
+                if self._fps_rt <= 0.0
+                else (self._fps_rt * 0.85 + inst_fps * 0.15)
+            )
+        fps = self._fps_rt if self._fps_rt > 0.0 else 0.0
+        self._last_frame_t = now
         depth_valid_ratio = float((depth_m > 0).mean()) if self.stage >= 3 else 0.0
 
         # 如需调试图像，则在 API 返回结构中附带，不在 run 内显示。
@@ -703,23 +733,17 @@ class QuestStereoPosePipeline:
             depth_vis_bgr = _colorize_depth(depth_m, self.min_depth, self.max_depth)
             stereo_vis_bgr = np.hstack((left_bgr, right_bgr))
 
-            _draw_text(
+            # 首行固定展示 fps，其他信息按短行显示，避免窗口文本溢出。
+            _draw_hud(
                 vis_bgr,
-                f"{phase} | fps={fps:.1f} | stage={self.stage} | det={det_count}",
-                12,
-                28,
+                [
+                    f"fps={fps:.1f} | stage={self.stage} | phase={phase}",
+                    f"det={det_count} | depth_valid={depth_valid_ratio:.1%}",
+                    f"yolo={timing.yolo_ms:.1f}ms | depth={timing.depth_ms:.1f}ms",
+                    f"cutie={timing.cutie_ms:.1f}ms | pose={timing.pose_ms:.1f}ms",
+                ],
             )
-            _draw_text(
-                vis_bgr,
-                (
-                    f"yolo={timing.yolo_ms:.1f}ms depth={timing.depth_ms:.1f}ms "
-                    f"cutie={timing.cutie_ms:.1f}ms pose={timing.pose_ms:.1f}ms "
-                    f"depth_valid={depth_valid_ratio:.1%}"
-                ),
-                12,
-                54,
-            )
-            _draw_text(stereo_vis_bgr, f"timestamp={stereo.timestamp_ms:.1f}ms", 12, 28)
+            _draw_hud(stereo_vis_bgr, f"timestamp={stereo.timestamp_ms:.1f}ms")
 
             debug_data = PipelineDebugData(
                 vis_bgr=vis_bgr,
@@ -833,8 +857,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return build_arg_parser().parse_args(argv)
 
 
-def validate_paths(args: argparse.Namespace) -> None:
-    """检查关键路径是否存在，避免运行中途失败。"""
+def build_quest_pipeline(args: argparse.Namespace) -> QuestStereoPosePipeline:
+    """构建 Quest Pipeline 对象（API 工厂函数）。"""
     required_paths = [
         args.yolo_model_path,
         args.mobileclip2_path,
@@ -847,11 +871,6 @@ def validate_paths(args: argparse.Namespace) -> None:
         if not Path(path).exists():
             raise FileNotFoundError(f"必要文件不存在: {path}")
 
-
-def build_quest_pipeline(args: argparse.Namespace) -> QuestStereoPosePipeline:
-    """构建 Quest Pipeline 对象（API 工厂函数）。"""
-    validate_paths(args)
-
     camera = QuestStereoCamera(
         listen_host=str(args.listen_host),
         listen_port=int(args.listen_port),
@@ -860,35 +879,29 @@ def build_quest_pipeline(args: argparse.Namespace) -> QuestStereoPosePipeline:
     )
 
     yolo = Yoloe26Masker(
-        Yoloe26Config(
-            model_path=_path_str(args.yolo_model_path),
-            conf=float(args.yolo_conf),
-            imgsz=int(args.yolo_imgsz),
-            max_det=int(args.yolo_max_det),
-            mask_threshold=float(args.yolo_mask_threshold),
-            use_half=False,
-            device=None,
-            mobileclip2_path=_path_str(args.mobileclip2_path),
-        ),
+        model_path=str(args.yolo_model_path),
         init_prompt=args.yolo_prompt,
+        conf=float(args.yolo_conf),
+        imgsz=int(args.yolo_imgsz),
+        max_det=int(args.yolo_max_det),
+        mask_threshold=float(args.yolo_mask_threshold),
+        use_half=False,
+        device=None,
+        mobileclip2_path=str(args.mobileclip2_path),
     )
 
     ffs = FastFoundationStereoRealtime(
-        FastFoundationStereoConfig(
-            model_dir=_path_str(args.ffs_model_path),
-            device=str(args.ffs_device),
-            scale=float(args.ffs_scale),
-            valid_iters=int(args.ffs_valid_iters),
-            max_disp=int(args.ffs_max_disp),
-            optimize_build_volume=str(args.ffs_optimize_build_volume),
-        )
+        model_dir=str(args.ffs_model_path),
+        device=str(args.ffs_device),
+        scale=float(args.ffs_scale),
+        valid_iters=int(args.ffs_valid_iters),
+        max_disp=int(args.ffs_max_disp),
+        optimize_build_volume=str(args.ffs_optimize_build_volume),
     )
 
-    use_2d_tracker = _bool_flag(args.activate_2d_tracker)
+    use_2d_tracker = bool(args.activate_2d_tracker)
     cutie_tracker = (
-        CutieTracker(
-            CutieConfig(seg_threshold=0.1, erosion_size=int(args.cutie_erosion_size))
-        )
+        CutieTracker(seg_threshold=0.1, erosion_size=int(args.cutie_erosion_size))
         if use_2d_tracker
         else None
     )

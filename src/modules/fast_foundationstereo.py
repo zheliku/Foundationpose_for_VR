@@ -14,7 +14,6 @@ import logging
 import sys
 import time
 from contextlib import nullcontext
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -22,36 +21,63 @@ import cv2
 import numpy as np
 
 
-@dataclass
-class FastFoundationStereoConfig:
-    """核心运行配置。"""
-
-    # 模型权重路径。
-    model_dir: str
-
-    # 推理设备："cuda" 或 "cpu"。
-    device: str = "cuda"
-
-    # 输入缩放比例（<1 可提速）。
-    scale: float = 1.0
-
-    # 迭代次数与最大视差。
-    valid_iters: int = 4
-    max_disp: int = 192
-
-    # 代价体构建后端。
-    optimize_build_volume: str = "triton"
-
-
 class FastFoundationStereoRealtime:
     """实时双目深度估计器。"""
 
-    def __init__(self, config: FastFoundationStereoConfig) -> None:
-        self.cfg = config
+    # 输入配置。
+    model_dir: str = ""  # 模型权重路径。
+    scale: float = 1.0  # 推理缩放比例。
+    valid_iters: int = 4  # 网络迭代次数。
+    max_disp: int = 192  # 最大视差。
+    optimize_build_volume: str = "triton"  # 体构建优化后端。
+
+    # 路径与依赖对象。
+    ffs_root: Path | None = None  # Fast-FoundationStereo 根目录。
+    torch: Any = None  # torch 模块引用。
+    InputPadder: Any = None  # 网络输入 padding 工具。
+    AMP_DTYPE: Any = None  # 混合精度 dtype。
+    set_logging_format: Any = None  # 日志配置函数。
+    set_seed: Any = None  # 随机种子函数。
+
+    # 运行时状态对象。
+    device: Any = None  # 当前推理设备。
+    model: Any = None  # 已加载的立体深度模型。
+
+    def __init__(
+        self,
+        model_dir: str,
+        device: str = "cuda",
+        scale: float = 1.0,
+        valid_iters: int = 4,
+        max_disp: int = 192,
+        optimize_build_volume: str = "triton",
+    ) -> None:
+        """
+        初始化 Fast-FoundationStereo 推理器。
+
+        参数：
+        - model_dir: 模型权重路径。
+        - device: 推理设备，支持 cuda/cpu。
+        - scale: 推理缩放比例。
+        - valid_iters: 网络迭代次数。
+        - max_disp: 最大视差。
+        - optimize_build_volume: 体构建优化模式。
+
+        初始化流程：
+        1. 保存推理参数。
+        2. 配置工程路径并动态导入依赖。
+        3. 设置日志、随机种子与设备。
+        4. 加载模型并写入关键推理参数。
+        """
+        self.model_dir = str(model_dir)
+        self.scale = float(scale)
+        self.valid_iters = int(valid_iters)
+        self.max_disp = int(max_disp)
+        self.optimize_build_volume = str(optimize_build_volume)
 
         # 定位 Fast-FoundationStereo 项目根目录并加入模块搜索路径。
-        self.project_root = Path(__file__).resolve().parents[2]
-        self.ffs_root = self.project_root / "Fast-FoundationStereo"
+        project_root = Path(__file__).resolve().parents[2]
+        self.ffs_root = project_root / "Fast-FoundationStereo"
         if str(self.ffs_root) not in sys.path:
             sys.path.append(str(self.ffs_root))
 
@@ -71,19 +97,20 @@ class FastFoundationStereoRealtime:
         self.torch.autograd.set_grad_enabled(False)
 
         # 指定 CUDA 但不可用时自动回退 CPU。
-        if self.cfg.device == "cuda" and not self.torch.cuda.is_available():
+        runtime_device = str(device)
+        if runtime_device == "cuda" and not self.torch.cuda.is_available():
             logging.warning("CUDA 不可用，自动回退到 CPU。")
-            self.cfg.device = "cpu"
-        self.device = self.torch.device(self.cfg.device)
+            runtime_device = "cpu"
+        self.device = self.torch.device(runtime_device)
 
         # 加载模型并写入关键推理参数。
         self.model = self.torch.load(
-            self.cfg.model_dir,
+            self.model_dir,
             map_location="cpu",
             weights_only=False,
         )
-        self.model.args.valid_iters = int(self.cfg.valid_iters)
-        self.model.args.max_disp = int(self.cfg.max_disp)
+        self.model.args.valid_iters = int(self.valid_iters)
+        self.model.args.max_disp = int(self.max_disp)
         self.model = self.model.to(self.device).eval()
 
         if hasattr(self.torch, "set_float32_matmul_precision"):
@@ -122,12 +149,12 @@ class FastFoundationStereoRealtime:
             right = right[..., :3]
 
         # 缩放用于加速，右图跟随左图尺寸。
-        if self.cfg.scale != 1.0:
+        if self.scale != 1.0:
             left = cv2.resize(
                 left,
                 dsize=None,
-                fx=float(self.cfg.scale),
-                fy=float(self.cfg.scale),
+                fx=float(self.scale),
+                fy=float(self.scale),
                 interpolation=cv2.INTER_LINEAR,
             )
             right = cv2.resize(
@@ -172,9 +199,9 @@ class FastFoundationStereoRealtime:
                 disp = self.model.forward(
                     left_t,
                     right_t,
-                    iters=int(self.cfg.valid_iters),
+                    iters=int(self.valid_iters),
                     test_mode=True,
-                    optimize_build_volume=str(self.cfg.optimize_build_volume),
+                    optimize_build_volume=str(self.optimize_build_volume),
                 )
 
         # 恢复尺寸并转到 numpy。
@@ -182,11 +209,11 @@ class FastFoundationStereoRealtime:
         disp = np.clip(disp, 1e-6, None)
 
         # 视差转深度：depth = fx * baseline / disp。
-        fx_scaled = float(fx) * float(self.cfg.scale)
+        fx_scaled = float(fx) * float(self.scale)
         depth_meter = (fx_scaled * float(baseline)) / disp
 
         # 若做过缩放，恢复到原图大小，便于和硬件深度对齐比较。
-        if self.cfg.scale != 1.0:
+        if self.scale != 1.0:
             depth_meter = cv2.resize(
                 depth_meter,
                 dsize=(left_image.shape[1], left_image.shape[0]),
@@ -233,14 +260,12 @@ if __name__ == "__main__":
 
     # 初始化双目推理器。
     estimator = FastFoundationStereoRealtime(
-        FastFoundationStereoConfig(
-            model_dir=model_dir,
-            device=device,
-            scale=scale,
-            valid_iters=valid_iters,
-            max_disp=max_disp,
-            optimize_build_volume=optimize_build_volume,
-        )
+        model_dir=model_dir,
+        device=device,
+        scale=scale,
+        valid_iters=valid_iters,
+        max_disp=max_disp,
+        optimize_build_volume=optimize_build_volume,
     )
 
     # 在循环开始前一次性读取标定参数，避免循环内判断逻辑。

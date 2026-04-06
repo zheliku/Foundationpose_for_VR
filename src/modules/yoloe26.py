@@ -36,33 +36,6 @@ from ultralytics import YOLOE
 
 
 @dataclass
-class Yoloe26Config:
-    """YOLOE-26 运行配置。"""
-
-    # 模型权重路径。
-    model_path: str
-
-    # 推理阈值与尺寸。
-    conf: float = 0.15
-    imgsz: int = 640
-    max_det: int = 2
-
-    # mask 二值化阈值。
-    mask_threshold: float = 0.5
-
-    # 是否启用半精度。YOLOE-seg 一般建议 False。
-    use_half: bool = False
-
-    # 指定设备：0 表示 GPU0，"cpu" 表示 CPU。
-    # 若设为 None，将自动选择（有 CUDA 则 0，否则 cpu）。
-    device: str | int | None = None
-
-    # 可选：本地 mobileclip2_b.ts 路径。
-    # 作用：避免 Ultralytics 在 set_classes() 时联网下载文本编码器。
-    mobileclip2_path: str | None = None
-
-
-@dataclass
 class Yoloe26Result:
     """单帧输出结果。"""
 
@@ -85,26 +58,74 @@ class Yoloe26Result:
 class Yoloe26Masker:
     """YOLOE-26 实时掩码生成器。"""
 
-    def __init__(self, config: Yoloe26Config, init_prompt: str | list[str]) -> None:
-        self.cfg = config
+    # 输入配置。
+    model_path: str = ""  # YOLOE 权重路径。
+    conf: float = 0.15  # 置信度阈值。
+    imgsz: int = 640  # 推理输入尺寸。
+    max_det: int = 2  # 最大检测数量。
+    mask_threshold: float = 0.5  # mask 二值化阈值。
+    use_half: bool = False  # 是否使用半精度。
+    device: str | int | None = None  # 推理设备。
+    mobileclip2_path: str | None = None  # 文本编码器权重路径。
+
+    # 运行时对象与状态。
+    model: YOLOE  # 已加载的 YOLOE 模型（__init__ 中创建）。
+    _prompt: list[str]  # 当前生效提示词（__init__ 中初始化）。
+
+    def __init__(
+        self,
+        model_path: str,
+        init_prompt: str | list[str],
+        conf: float = 0.15,
+        imgsz: int = 640,
+        max_det: int = 2,
+        mask_threshold: float = 0.5,
+        use_half: bool = False,
+        device: str | int | None = None,
+        mobileclip2_path: str | None = None,
+    ) -> None:
+        """
+        初始化 YOLOE 掩码生成器。
+
+        参数：
+        - model_path: YOLOE 权重路径。
+        - init_prompt: 初始提示词。
+        - conf/imgsz/max_det: 推理阈值与输入尺寸配置。
+        - mask_threshold: mask 二值化阈值。
+        - use_half: 是否使用半精度。
+        - device: 指定推理设备；为空时自动选择。
+        - mobileclip2_path: 文本编码器权重路径。
+
+        初始化流程：
+        1. 保存配置并检查权重文件。
+        2. 自动选择运行设备。
+        3. 配置 mobileclip2 本地路径。
+        4. 加载模型并设置初始提示词。
+        """
+        self.model_path = str(model_path)
+        self.conf = float(conf)
+        self.imgsz = int(imgsz)
+        self.max_det = int(max_det)
+        self.mask_threshold = float(mask_threshold)
+        self.use_half = bool(use_half)
+        self.device = device
+        self.mobileclip2_path = mobileclip2_path
 
         # 校验模型路径，提前失败更易定位问题。
-        model_path = Path(self.cfg.model_path)
-        if not model_path.exists():
-            raise FileNotFoundError(f"模型文件不存在: {model_path}")
+        model_path_obj = Path(self.model_path)
+        if not model_path_obj.exists():
+            raise FileNotFoundError(f"模型文件不存在: {model_path_obj}")
 
         # 自动选择设备：有 CUDA 则 GPU0，否则 CPU。
-        if self.cfg.device is None:
-            self.device: str | int = 0 if torch.cuda.is_available() else "cpu"
-        else:
-            self.device = self.cfg.device
+        if self.device is None:
+            self.device = 0 if torch.cuda.is_available() else "cpu"
 
         # 在 set_classes 前配置本地 mobileclip2 权重路径。
         self._configure_mobileclip2_path()
 
         # 加载模型并设置初始类别提示。
-        self.model = YOLOE(str(model_path))
-        self._prompt: list[str] = []
+        self.model = YOLOE(str(self.model_path))
+        self._prompt = []
         self.set_prompt(init_prompt)
 
         # 融合层可提升推理速度。
@@ -118,10 +139,10 @@ class Yoloe26Masker:
         去当前权重目录/下载源查找文本编码器。这里提前把本地文件挂到可查找位置，
         避免 GitHub 403 或离线环境失败。
         """
-        if not self.cfg.mobileclip2_path:
+        if not self.mobileclip2_path:
             return
 
-        src = Path(self.cfg.mobileclip2_path).expanduser().resolve()
+        src = Path(self.mobileclip2_path).expanduser().resolve()
         if not src.exists():
             raise FileNotFoundError(f"mobileclip2 文件不存在: {src}")
 
@@ -192,11 +213,11 @@ class Yoloe26Masker:
         t0 = time.perf_counter()
         result = self.model.predict(
             source=frame,
-            conf=float(self.cfg.conf),
-            imgsz=int(self.cfg.imgsz),
-            max_det=int(self.cfg.max_det),
+            conf=float(self.conf),
+            imgsz=int(self.imgsz),
+            max_det=int(self.max_det),
             device=self.device,
-            half=bool(self.cfg.use_half),
+            half=bool(self.use_half),
             save=False,
             verbose=False,
         )[0]
@@ -224,9 +245,7 @@ class Yoloe26Masker:
                 masks = masks_data.detach().cpu().numpy()
             else:
                 masks = np.asarray(masks_data)
-            binary_masks = (masks >= float(self.cfg.mask_threshold)).astype(
-                np.uint8
-            ) * 255
+            binary_masks = (masks >= float(self.mask_threshold)).astype(np.uint8) * 255
             mask_bw = np.max(binary_masks, axis=0)
 
         return Yoloe26Result(
@@ -271,17 +290,15 @@ if __name__ == "__main__":
     camera.start()
 
     masker = Yoloe26Masker(
-        Yoloe26Config(
-            model_path=MODEL_PATH,
-            conf=CONF,
-            imgsz=IMGSZ,
-            max_det=MAX_DET,
-            mask_threshold=MASK_THRESHOLD,
-            use_half=USE_HALF,
-            device=None,
-            mobileclip2_path=MOBILECLIP2_PATH,
-        ),
+        model_path=MODEL_PATH,
         init_prompt=PROMPT,
+        conf=CONF,
+        imgsz=IMGSZ,
+        max_det=MAX_DET,
+        mask_threshold=MASK_THRESHOLD,
+        use_half=USE_HALF,
+        device=None,
+        mobileclip2_path=MOBILECLIP2_PATH,
     )
 
     cv2.namedWindow("YOLOE26 Overlay", cv2.WINDOW_AUTOSIZE)

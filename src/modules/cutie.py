@@ -13,22 +13,12 @@ from dataclasses import dataclass
 import importlib
 from pathlib import Path
 import sys
+from typing import Any
 
 import cv2
 import numpy as np
 import torch
 from torchvision.transforms.functional import to_tensor
-
-
-@dataclass
-class CutieConfig:
-    """Cutie 跟踪配置。"""
-
-    # 分割置信阈值（当前版本主要由模型内部控制，保留该项方便后续扩展）。
-    seg_threshold: float = 0.1
-
-    # 为了更稳的 bbox，先对 mask 做一次腐蚀。
-    erosion_size: int = 5
 
 
 @dataclass
@@ -64,12 +54,39 @@ class Tracker2D:
 class CutieTracker(Tracker2D):
     """Cutie 的简洁封装。"""
 
-    def __init__(self, config: CutieConfig | None = None) -> None:
+    # 输入配置。
+    seg_threshold: float = 0.1  # 分割阈值。
+    erosion_size: int = 5  # mask 腐蚀核大小（像素）。
+
+    # 运行时对象。
+    device: str = "cpu"  # 推理设备标识（cuda/cpu）。
+    model: Any = None  # Cutie 模型对象。
+    processor: Any = None  # Cutie 推理处理器（InferenceCore）。
+
+    def __init__(
+        self,
+        seg_threshold: float = 0.1,
+        erosion_size: int = 5,
+    ) -> None:
+        """
+        初始化 Cutie 跟踪器。
+
+        参数：
+        - seg_threshold: 分割阈值。
+        - erosion_size: mask 后处理腐蚀核大小。
+
+        初始化流程：
+        1. 保存基础参数。
+        2. 选择运行设备。
+        3. 配置 Cutie 包导入路径。
+        4. 创建模型与 InferenceCore 处理器。
+        """
         super().__init__()
-        self.cfg = config or CutieConfig()
+        self.seg_threshold = float(seg_threshold)
+        self.erosion_size = int(erosion_size)
 
         # 自动选择设备。
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
         # 简洁做法：显式从项目目录 Cutie/cutie 导入。
         # 这样不会再和当前文件名 cutie.py 发生同名冲突。
@@ -120,9 +137,7 @@ class CutieTracker(Tracker2D):
 
     def _bbox_from_mask(self, mask: np.ndarray) -> list[int]:
         """由 mask 提取 bbox。"""
-        kernel = np.ones(
-            (int(self.cfg.erosion_size), int(self.cfg.erosion_size)), np.uint8
-        )
+        kernel = np.ones((int(self.erosion_size), int(self.erosion_size)), np.uint8)
         mask_eroded = cv2.erode(mask.astype(np.uint8), kernel, iterations=1)
 
         rows = np.any(mask_eroded, axis=1)
@@ -220,7 +235,7 @@ if __name__ == "__main__":
     camera = RealSenseCamera(width=width, height=height, fps=fps)
     camera.start()
 
-    tracker = CutieTracker(CutieConfig(seg_threshold=0.1, erosion_size=5))
+    tracker = CutieTracker(seg_threshold=0.1, erosion_size=5)
 
     cv2.namedWindow("Cutie Frame", cv2.WINDOW_AUTOSIZE)
     cv2.namedWindow("Cutie Mask", cv2.WINDOW_AUTOSIZE)
