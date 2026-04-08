@@ -5,7 +5,7 @@ import json
 from .base_decoder import PayloadDecoder
 
 
-class PoseServerDecoder(PayloadDecoder):
+class PoseDecoder(PayloadDecoder):
     """Decode one-part pose server JSON payload."""
 
     def decode(self, parts: list[bytes]) -> dict[str, object] | None:

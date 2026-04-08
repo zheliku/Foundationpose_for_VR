@@ -778,37 +778,100 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Quest 位姿 Pipeline（结构化 API 版）")
 
     # Quest 网络输入参数。
-    parser.add_argument("--listen_host", type=str, default="*")
-    parser.add_argument("--listen_port", type=int, default=5557)
-    parser.add_argument("--recv_hwm", type=int, default=1)
-    parser.add_argument("--recv_timeout_ms", type=int, default=100)
+    parser.add_argument(
+        "--listen_host",
+        type=str,
+        default="*",
+        help="Quest 双目接收端监听地址。'*' 表示监听所有网卡地址。",
+    )
+    parser.add_argument(
+        "--listen_port",
+        type=int,
+        default=5557,
+        help="Quest 双目接收端口（需与 Unity 发送端端口一致）。",
+    )
+    parser.add_argument(
+        "--recv_hwm",
+        type=int,
+        default=1,
+        help="接收端高水位（High Water Mark），值小可降低延迟但更容易丢旧帧。",
+    )
+    parser.add_argument(
+        "--recv_timeout_ms",
+        type=int,
+        default=100,
+        help="接收超时时间（毫秒）。超时后当前轮询返回空帧并继续下一轮。",
+    )
 
     # 标定与处理分辨率参数。
     parser.add_argument(
         "--calib_dir",
         type=Path,
         default=PROJECT_DIR / "Calibration" / "20260322_070544",
+        help="Quest 双目标定目录，需包含 left_camera_characteristics.json 与 right_camera_characteristics.json。",
     )
-    parser.add_argument("--calib_assume_center_crop", type=int, default=1)
-    parser.add_argument("--process_width", type=int, default=640)
-    parser.add_argument("--process_height", type=int, default=480)
+    parser.add_argument(
+        "--calib_assume_center_crop",
+        type=int,
+        default=1,
+        help="是否按“中心裁剪+缩放”映射标定内参到运行分辨率（1=是，0=仅线性缩放）。",
+    )
+    parser.add_argument(
+        "--process_width",
+        type=int,
+        default=640,
+        help="算法处理分辨率宽度（像素）。",
+    )
+    parser.add_argument(
+        "--process_height",
+        type=int,
+        default=480,
+        help="算法处理分辨率高度（像素）。",
+    )
 
     # YOLO 参数。
     parser.add_argument(
         "--yolo_model_path",
         type=Path,
         default=PROJECT_DIR / "checkpoints" / "yoloe-26l-seg.pt",
+        help="YOLOE 分割模型权重路径。",
     )
     parser.add_argument(
         "--mobileclip2_path",
         type=Path,
         default=PROJECT_DIR / "mobileclip2_b.ts",
+        help="YOLOE 文本编码器（mobileclip2）权重路径。",
     )
-    parser.add_argument("--yolo_prompt", type=str, default="white cube")
-    parser.add_argument("--yolo_conf", type=float, default=0.15)
-    parser.add_argument("--yolo_imgsz", type=int, default=640)
-    parser.add_argument("--yolo_max_det", type=int, default=2)
-    parser.add_argument("--yolo_mask_threshold", type=float, default=0.5)
+    parser.add_argument(
+        "--yolo_prompt",
+        type=str,
+        default="white cube",
+        help="YOLOE 文本提示词，用于指定目标类别（例如 white cube）。",
+    )
+    parser.add_argument(
+        "--yolo_conf",
+        type=float,
+        default=0.15,
+        help="YOLO 检测置信度阈值，越大越严格。",
+    )
+    parser.add_argument(
+        "--yolo_imgsz",
+        type=int,
+        default=640,
+        help="YOLO 推理输入尺寸。",
+    )
+    parser.add_argument(
+        "--yolo_max_det",
+        type=int,
+        default=2,
+        help="YOLO 每帧最大保留检测数量。",
+    )
+    parser.add_argument(
+        "--yolo_mask_threshold",
+        type=float,
+        default=0.5,
+        help="YOLO 分割 mask 的二值化阈值。",
+    )
 
     # FFS 参数。
     parser.add_argument(
@@ -819,36 +882,98 @@ def build_arg_parser() -> argparse.ArgumentParser:
         / "weights"
         / "20-30-48"
         / "model_best_bp2_serialize.pth",
+        help="Fast-FoundationStereo 权重路径。",
     )
-    parser.add_argument("--ffs_device", type=str, default="cuda")
-    parser.add_argument("--ffs_scale", type=float, default=1.0)
-    parser.add_argument("--ffs_valid_iters", type=int, default=4)
-    parser.add_argument("--ffs_max_disp", type=int, default=192)
+    parser.add_argument(
+        "--ffs_device",
+        type=str,
+        default="cuda",
+        help="FFS 推理设备（cuda 或 cpu）。",
+    )
+    parser.add_argument(
+        "--ffs_scale",
+        type=float,
+        default=1.0,
+        help="FFS 推理缩放系数，<1 可提速但会牺牲精度。",
+    )
+    parser.add_argument(
+        "--ffs_valid_iters",
+        type=int,
+        default=4,
+        help="FFS 网络迭代次数，越大通常越稳但更慢。",
+    )
+    parser.add_argument(
+        "--ffs_max_disp",
+        type=int,
+        default=192,
+        help="FFS 最大视差范围（像素）。",
+    )
     parser.add_argument(
         "--ffs_optimize_build_volume",
         type=str,
         default="triton",
         choices=["triton", "pytorch1"],
+        help="FFS 体构建优化后端：triton 或 pytorch1。",
     )
-    parser.add_argument("--min_depth", type=float, default=0.1)
-    parser.add_argument("--max_depth", type=float, default=3.0)
+    parser.add_argument(
+        "--min_depth",
+        type=float,
+        default=0.1,
+        help="有效深度下限（米），低于此值会被置零。",
+    )
+    parser.add_argument(
+        "--max_depth",
+        type=float,
+        default=3.0,
+        help="有效深度上限（米），高于此值会被置零。",
+    )
 
     # FoundationPose 参数。
     parser.add_argument(
         "--mesh_path",
         type=Path,
         default=PROJECT_DIR / "data" / "online" / "cube" / "mesh" / "cube.stl",
+        help="FoundationPose 使用的目标物体网格模型路径。",
     )
-    parser.add_argument("--est_refine_iter", type=int, default=5)
-    parser.add_argument("--track_refine_iter", type=int, default=2)
     parser.add_argument(
-        "--symmetry_mode", type=str, default="cube", choices=["none", "cube"]
+        "--est_refine_iter",
+        type=int,
+        default=5,
+        help="FoundationPose 首次注册阶段迭代次数。",
+    )
+    parser.add_argument(
+        "--track_refine_iter",
+        type=int,
+        default=2,
+        help="FoundationPose 连续跟踪阶段迭代次数。",
+    )
+    parser.add_argument(
+        "--symmetry_mode",
+        type=str,
+        default="cube",
+        choices=["none", "cube"],
+        help="对称约束模式：none 关闭，cube 使用立方体 24 对称群。",
     )
 
     # 统计与 2D tracker 参数。
-    parser.add_argument("--stats_interval", type=int, default=30)
-    parser.add_argument("--activate_2d_tracker", type=int, default=1)
-    parser.add_argument("--cutie_erosion_size", type=int, default=5)
+    parser.add_argument(
+        "--stats_interval",
+        type=int,
+        default=30,
+        help="统计日志输出间隔（按帧数计）。",
+    )
+    parser.add_argument(
+        "--activate_2d_tracker",
+        type=int,
+        default=1,
+        help="是否启用 Cutie 2D 跟踪（1=启用，0=关闭）。",
+    )
+    parser.add_argument(
+        "--cutie_erosion_size",
+        type=int,
+        default=5,
+        help="Cutie mask 腐蚀核大小（像素），用于稳定 bbox 边界。",
+    )
     return parser
 
 

@@ -9,7 +9,7 @@ from numpy.typing import NDArray
 from .base_decoder import PayloadDecoder
 
 
-class StereoJpegDecoder(PayloadDecoder):
+class StereoDecoder(PayloadDecoder):
     """Decode [left_jpg, right_jpg] or [packed_stereo_jpg] to stereo BGR."""
 
     def decode(

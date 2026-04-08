@@ -7,7 +7,7 @@ import numpy as np
 from .base_encoder import BaseEncoder
 
 
-class PoseServerEncoder(BaseEncoder):
+class PoseEncoder(BaseEncoder):
     """Encode pose_server output to one-part JSON payload."""
 
     def encode(

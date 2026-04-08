@@ -26,13 +26,13 @@ import numpy as np
 
 try:
     # 正常包导入路径（如: from modules.quest_stereo import ...）。
-    from zmq_utils import PayloadReceiver, StereoJpegDecoder
+    from zmq_utils import PayloadReceiver, StereoDecoder
 except ModuleNotFoundError:
     # 兼容直接运行 src/modules/quest_stereo.py 的场景。
     src_root = Path(__file__).resolve().parents[1]
     if str(src_root) not in sys.path:
         sys.path.append(str(src_root))
-    from zmq_utils import PayloadReceiver, StereoJpegDecoder
+    from zmq_utils import PayloadReceiver, StereoDecoder
 
 
 @dataclass
@@ -77,7 +77,7 @@ class QuestStereoCamera:
 
     # 运行时对象。
     receiver: PayloadReceiver | None = None  # 负载接收器。
-    decoder: StereoJpegDecoder  # 双目 JPEG 解码器（__init__ 中创建）。
+    decoder: StereoDecoder  # 双目 JPEG 解码器（__init__ 中创建）。
 
     # 运行状态标志。
     _started: bool = False  # 是否已经启动接收。
@@ -118,7 +118,7 @@ class QuestStereoCamera:
 
         self.endpoint = f"tcp://{self.listen_host}:{self.listen_port}"
 
-        self.decoder = StereoJpegDecoder()
+        self.decoder = StereoDecoder()
 
     def start(self) -> None:
         """启动网络接收器。"""

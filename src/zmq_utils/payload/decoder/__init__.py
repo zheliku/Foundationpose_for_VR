@@ -1,15 +1,11 @@
 from .base_decoder import PayloadDecoder
-from .pose_server_decoder import PoseServerDecoder
+from .pose_decoder import PoseDecoder
 from .rgbd_decoder import RGBDDecoder
-from .stereo_jpeg_decoder import StereoJpegDecoder
-from .tracking_decoder import TrackingDecoder
-from .utf8_text_decoder import Utf8TextDecoder
+from .stereo_decoder import StereoDecoder
 
 __all__ = [
     "PayloadDecoder",
-    "StereoJpegDecoder",
+    "StereoDecoder",
     "RGBDDecoder",
-    "TrackingDecoder",
-    "Utf8TextDecoder",
-    "PoseServerDecoder",
+    "PoseDecoder",
 ]
