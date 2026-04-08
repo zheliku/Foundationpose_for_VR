@@ -787,7 +787,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--calib_dir",
         type=Path,
-        default=PROJECT_DIR / "docs" / "20260322_070544",
+        default=PROJECT_DIR / "Calibration" / "20260322_070544",
     )
     parser.add_argument("--calib_assume_center_crop", type=int, default=1)
     parser.add_argument("--process_width", type=int, default=640)
