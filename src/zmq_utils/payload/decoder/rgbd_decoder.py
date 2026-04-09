@@ -7,6 +7,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .base_decoder import PayloadDecoder
+from ..message.rgbd import RGBDMsg
 
 
 class RGBDDecoder(PayloadDecoder):
@@ -15,11 +16,16 @@ class RGBDDecoder(PayloadDecoder):
     def decode(
         self, parts: list[bytes]
     ) -> tuple[NDArray[np.uint8], NDArray[np.uint16]] | None:
-        if len(parts) != 2:
+        payload = RGBDMsg.from_parts(parts)
+        if payload is None:
             return None
 
-        color = cv2.imdecode(np.frombuffer(parts[0], np.uint8), cv2.IMREAD_COLOR)
-        depth = cv2.imdecode(np.frombuffer(parts[1], np.uint8), cv2.IMREAD_UNCHANGED)
+        color = cv2.imdecode(
+            np.frombuffer(payload.color_image, np.uint8), cv2.IMREAD_COLOR
+        )
+        depth = cv2.imdecode(
+            np.frombuffer(payload.depth_image, np.uint8), cv2.IMREAD_UNCHANGED
+        )
 
         if color is None or depth is None:
             return None

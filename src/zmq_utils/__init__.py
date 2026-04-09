@@ -18,11 +18,14 @@ from .communicate import PayloadReceiver, PayloadSender
 from .payload import (
     BaseEncoder,
     PayloadDecoder,
+    PoseMsg,
     PoseDecoder,
     PoseEncoder,
     RGBDDecoder,
     RGBDEncoder,
+    RGBDMsg,
     StereoDecoder,
+    QuestStereoMsg,
 )
 
 
@@ -38,4 +41,7 @@ __all__ = [
     "RGBDDecoder",
     "PoseEncoder",
     "PoseDecoder",
+    "PoseMsg",
+    "RGBDMsg",
+    "QuestStereoMsg",
 ]

@@ -23,7 +23,7 @@ from modules import (  # noqa: E402
     FastFoundationStereoRealtime,
     FoundationPoseEstimator,
     QuestStereoCamera,
-    QuestStereoFrame,
+    QuestStereoMsg,
     Yoloe26Masker,
 )
 from modules.cutie import CutieTracker  # noqa: E402
@@ -527,11 +527,16 @@ class QuestStereoPosePipeline:
         window_fps = self.stats_interval / interval
 
         q_stats = self.camera.get_stats()
+        sender_est_ms = float(q_stats.get("sender_est_delay_ms", 0.0) or 0.0)
+        sender_raw_ms = float(q_stats.get("sender_raw_delta_ms", 0.0) or 0.0)
+        sender_gap = int(q_stats.get("sender_gap", 0) or 0)
+        sender_meta = int(q_stats.get("sender_meta", 0) or 0)
+        sender_fps = float(q_stats.get("sender_fps", 0.0) or 0.0)
 
         logging.info(
             "[stats] frames=%d stage=%d phase=%s rt_fps=%.1f window_fps=%.1f "
             "avg(yolo/depth/cutie/pose)=%.1f/%.1f/%.1f/%.1fms depth_valid=%.1f%% "
-            "recv=%s decode_fail=%s drained=%s",
+            "recv=%s decode_fail=%s drained=%s sender_fps=%.1f sender_est=%.1fms sender_raw=%.1fms sender_gap=%s sender_meta=%s",
             self._frame_count,
             self.stage,
             output.phase,
@@ -545,6 +550,11 @@ class QuestStereoPosePipeline:
             q_stats.get("received", 0),
             q_stats.get("decode_failed", 0),
             q_stats.get("drained", 0),
+            sender_fps,
+            sender_est_ms,
+            sender_raw_ms,
+            sender_gap,
+            sender_meta,
         )
 
         self._stats_t = now
@@ -575,6 +585,10 @@ class QuestStereoPosePipeline:
         if stereo is None:
             return None
 
+        # StereoDecoder 理论上会填充左右图和接收时间，这里做保护以满足静态类型检查。
+        if stereo.left is None or stereo.right is None or stereo.timestamp_ms is None:
+            return None
+
         # K 在 __init__ 已固定，这里直接按目标分辨率处理双目图。
         left_bgr, right_bgr = self._preprocess_stereo_pair(
             stereo.left,
@@ -582,6 +596,8 @@ class QuestStereoPosePipeline:
             target_width=self.frame_w,
             target_height=self.frame_h,
         )
+
+        stereo_timestamp_ms = float(stereo.timestamp_ms)
 
         if self.pose_estimator is None:
             raise RuntimeError("pose_estimator 尚未初始化。")
@@ -743,7 +759,7 @@ class QuestStereoPosePipeline:
                     f"cutie={timing.cutie_ms:.1f}ms | pose={timing.pose_ms:.1f}ms",
                 ],
             )
-            _draw_hud(stereo_vis_bgr, f"timestamp={stereo.timestamp_ms:.1f}ms")
+            _draw_hud(stereo_vis_bgr, f"timestamp={stereo_timestamp_ms:.1f}ms")
 
             debug_data = PipelineDebugData(
                 vis_bgr=vis_bgr,
@@ -753,7 +769,7 @@ class QuestStereoPosePipeline:
             )
 
         output = PosePipelineOutput(
-            timestamp_ms=float(stereo.timestamp_ms),
+            timestamp_ms=stereo_timestamp_ms,
             stage=self.stage,
             phase=phase,
             det_count=det_count,

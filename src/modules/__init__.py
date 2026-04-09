@@ -1,9 +1,9 @@
-"""Foundationpose_for_VR modules package."""
+"""Foundationpose_for_VR 模块包导出。"""
 
 from .realsense import RGBDFrame, RealSenseCamera, StereoFrame
 from .yoloe26 import Yoloe26Masker, Yoloe26Result
 from .fast_foundationstereo import FastFoundationStereoRealtime
-from .quest_stereo import QuestStereoCamera, QuestStereoFrame
+from .quest_stereo import QuestStereoCamera, QuestStereoMsg
 from .foundationpose import FoundationPoseEstimator
 
 __all__ = [
@@ -14,6 +14,6 @@ __all__ = [
     "Yoloe26Result",
     "FastFoundationStereoRealtime",
     "QuestStereoCamera",
-    "QuestStereoFrame",
+    "QuestStereoMsg",
     "FoundationPoseEstimator",
 ]

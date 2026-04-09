@@ -107,26 +107,6 @@ class PayloadSender:
     def send_multipart(self, parts: list[bytes], topic: str | None = None) -> bool:
         return self.send_payload(parts, topic=topic)
 
-    """发送单帧原始字节。"""
-
-    def send_raw(self, data: bytes, topic: str | None = None) -> bool:
-        return self.send_payload([data], topic=topic)
-
-    """发送 UTF-8 文本。"""
-
-    def send_text(
-        self,
-        text: str,
-        topic: str | None = None,
-        encoding: str = "utf-8",
-    ) -> bool:
-        return self.send_raw(text.encode(encoding), topic=topic)
-
-    """发送 JSON 对象（内部转为 UTF-8 文本）。"""
-
-    def send_json(self, obj: Any, topic: str | None = None) -> bool:
-        return self.send_text(json.dumps(obj, ensure_ascii=False), topic=topic)
-
     """关闭 socket。"""
 
     def close(self) -> None:

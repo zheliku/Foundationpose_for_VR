@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import json
-
 from .base_decoder import PayloadDecoder
+from ..message.pose import PoseMsg
 
 
 class PoseDecoder(PayloadDecoder):
@@ -12,13 +11,8 @@ class PoseDecoder(PayloadDecoder):
         if len(parts) < 1:
             return None
 
-        try:
-            text = parts[0].decode("utf-8")
-            obj = json.loads(text)
-        except (UnicodeDecodeError, json.JSONDecodeError):
+        message = PoseMsg.from_json_bytes(parts[0])
+        if message is None:
             return None
 
-        if not isinstance(obj, dict):
-            return None
-
-        return obj
+        return message.to_dict()

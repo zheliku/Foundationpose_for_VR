@@ -11,11 +11,15 @@ from .decoder import (
     StereoDecoder,
 )
 from .encoder import BaseEncoder, PoseEncoder, RGBDEncoder
+from .message import PoseMsg, QuestStereoMsg, RGBDMsg
 
 __all__ = [
     "BaseEncoder",
     "RGBDEncoder",
     "PoseEncoder",
+    "PoseMsg",
+    "RGBDMsg",
+    "QuestStereoMsg",
     "PayloadDecoder",
     "StereoDecoder",
     "RGBDDecoder",

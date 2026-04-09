@@ -5,6 +5,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .base_encoder import BaseEncoder
+from ..message.rgbd import RGBDMsg
 
 
 class RGBDEncoder(BaseEncoder):
@@ -28,4 +29,8 @@ class RGBDEncoder(BaseEncoder):
         if not success:
             return None
 
-        return [color_buf.tobytes(), depth_buf.tobytes()]
+        payload = RGBDMsg(
+            color_image=color_buf.tobytes(),
+            depth_image=depth_buf.tobytes(),
+        )
+        return payload.to_parts()
