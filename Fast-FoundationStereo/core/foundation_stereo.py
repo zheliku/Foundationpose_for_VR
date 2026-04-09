@@ -1,3 +1,4 @@
+from PIL import Image as _PILImage  # Preload Pillow native extension before torchvision import chain.
 import torch,pdb,logging,timm
 import torch.nn as nn
 import torch.nn.functional as F

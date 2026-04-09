@@ -8,5 +8,5 @@ class BaseEncoder(ABC):
     """Base payload encoder interface."""
 
     @abstractmethod
-    def encode(self, *args: Any, **kwargs: Any) -> list[bytes] | None:
+    def encode(self, *args: Any, **kwargs: Any) -> bytes | None:
         raise NotImplementedError

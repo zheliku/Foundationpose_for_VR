@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import zmq
@@ -11,7 +10,7 @@ import zmq
 
 职责：
 1) 管理 ZMQ socket 生命周期（创建、连接、关闭）。
-2) 提供统一发送接口（payload/multipart/raw/text/json）。
+2) 提供统一发送接口（single payload）。
 3) 支持两种模式：
      - send_topic=False -> PUSH（点对点/管道式）
      - send_topic=True  -> PUB（发布订阅式，首帧为 topic）
@@ -33,11 +32,18 @@ class PayloadSender:
     - default_topic: send_topic=True 且 send_payload 未传 topic 时使用。
     """
 
+    # ZMQ 上下文与底层 socket。
     ctx: zmq.Context[zmq.Socket[bytes]]
     socket: zmq.Socket[bytes] | None
-    endpoint: str
-    hwm: int
-    is_bind: bool
+
+    # 连接配置。
+    endpoint: str  # 完整连接地址（如 tcp://127.0.0.1:5555）。
+    hwm: int  # 高水位，控制发送侧积压上限。
+    is_bind: bool  # True=bind，False=connect。
+
+    # 可选 topic 配置（PUB/SUB 场景）。
+    send_topic: bool  # 是否发送 topic 前缀。
+    default_topic: str | None  # send_topic=True 时的默认 topic。
 
     def __init__(
         self,
@@ -47,6 +53,7 @@ class PayloadSender:
         send_topic: bool = False,
         default_topic: str | None = None,
     ) -> None:
+        # 仅做必要初始化：保存配置并创建 socket。
         self.ctx = zmq.Context.instance()
         self.socket = None
         self.endpoint = endpoint
@@ -56,9 +63,8 @@ class PayloadSender:
         self.default_topic = default_topic
         self._setup_socket()
 
-    """创建 socket 并执行 bind/connect。"""
-
     def _setup_socket(self) -> None:
+        """创建 socket 并执行 bind/connect。"""
         socket_type = zmq.PUB if self.send_topic else zmq.PUSH
         self.socket = self.ctx.socket(socket_type)
         self.socket.set_hwm(self.hwm)
@@ -69,24 +75,26 @@ class PayloadSender:
             self.socket.connect(self.endpoint)
             print(f"[{self.__class__.__name__}] Connected to {self.endpoint}")
 
-    """发送业务 payload（list[bytes]）。
+    """发送业务 payload（单帧 bytes）。
 
     当 send_topic=True 时，发送格式为：
-        [topic_utf8, *parts]
+        [topic_utf8, payload]
     否则发送格式为：
-        [*parts]
+        payload
 
     返回：
     - True: 成功发送
     - False: 发送失败（常见于 NOBLOCK 下拥塞）
     """
 
-    def send_payload(self, parts: list[bytes], topic: str | None = None) -> bool:
+    def send_payload(self, payload: bytes, topic: str | None = None) -> bool:
         if self.socket is None:
             return False
 
-        if not parts:
+        if payload is None or len(payload) == 0:
             return False
+
+        payload_bytes = bytes(payload)
 
         try:
             if self.send_topic:
@@ -94,18 +102,13 @@ class PayloadSender:
                 if not actual_topic:
                     return False
                 self.socket.send_multipart(
-                    [actual_topic.encode("utf-8"), *parts], flags=zmq.NOBLOCK
+                    [actual_topic.encode("utf-8"), payload_bytes], flags=zmq.NOBLOCK
                 )
             else:
-                self.socket.send_multipart(parts, flags=zmq.NOBLOCK)
+                self.socket.send(payload_bytes, flags=zmq.NOBLOCK)
             return True
         except zmq.Again:
             return False
-
-    """send_payload 的同义别名，便于表达“发送多帧消息”。"""
-
-    def send_multipart(self, parts: list[bytes], topic: str | None = None) -> bool:
-        return self.send_payload(parts, topic=topic)
 
     """关闭 socket。"""
 

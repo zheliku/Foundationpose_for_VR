@@ -273,7 +273,7 @@ def run_pose_server(args: argparse.Namespace) -> None:
                 continue
 
             # 3) 编码协议负载：统一字段结构，便于 Unity 端稳定解码。
-            packet_parts = encoder.encode(
+            payload = encoder.encode(
                 timestamp_ms=output.timestamp_ms,
                 stage=output.stage,
                 phase=output.phase,
@@ -288,8 +288,12 @@ def run_pose_server(args: argparse.Namespace) -> None:
                 },
                 pose_4x4=output.pose_4x4,
             )
+            if payload is None:
+                dropped_count += 1
+                continue
+
             send_t0 = time.perf_counter()
-            sent = sender.send_multipart(packet_parts)
+            sent = sender.send_payload(payload)
             send_ms = (time.perf_counter() - send_t0) * 1000.0
 
             # 4) 统计分段耗时：

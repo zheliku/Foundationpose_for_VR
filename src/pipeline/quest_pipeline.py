@@ -530,13 +530,12 @@ class QuestStereoPosePipeline:
         sender_est_ms = float(q_stats.get("sender_est_delay_ms", 0.0) or 0.0)
         sender_raw_ms = float(q_stats.get("sender_raw_delta_ms", 0.0) or 0.0)
         sender_gap = int(q_stats.get("sender_gap", 0) or 0)
-        sender_meta = int(q_stats.get("sender_meta", 0) or 0)
         sender_fps = float(q_stats.get("sender_fps", 0.0) or 0.0)
 
         logging.info(
             "[stats] frames=%d stage=%d phase=%s rt_fps=%.1f window_fps=%.1f "
             "avg(yolo/depth/cutie/pose)=%.1f/%.1f/%.1f/%.1fms depth_valid=%.1f%% "
-            "recv=%s decode_fail=%s drained=%s sender_fps=%.1f sender_est=%.1fms sender_raw=%.1fms sender_gap=%s sender_meta=%s",
+            "recv=%s decode_fail=%s sender_fps=%.1f sender_est=%.1fms sender_raw=%.1fms sender_gap=%s",
             self._frame_count,
             self.stage,
             output.phase,
@@ -549,12 +548,10 @@ class QuestStereoPosePipeline:
             output.depth_valid_ratio * 100.0,
             q_stats.get("received", 0),
             q_stats.get("decode_failed", 0),
-            q_stats.get("drained", 0),
             sender_fps,
             sender_est_ms,
             sender_raw_ms,
             sender_gap,
-            sender_meta,
         )
 
         self._stats_t = now
@@ -896,7 +893,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=PROJECT_DIR
         / "Fast-FoundationStereo"
         / "weights"
-        / "20-30-48"
+        / "23-36-37"
         / "model_best_bp2_serialize.pth",
         help="Fast-FoundationStereo 权重路径。",
     )

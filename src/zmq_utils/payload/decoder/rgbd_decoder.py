@@ -11,20 +11,20 @@ from ..message.rgbd import RGBDMsg
 
 
 class RGBDDecoder(PayloadDecoder):
-    """Decode [color_jpg, depth_png] to (color, depth)."""
+    """Decode single RGBD payload bytes to (color, depth)."""
 
     def decode(
-        self, parts: list[bytes]
+        self, payload: bytes
     ) -> tuple[NDArray[np.uint8], NDArray[np.uint16]] | None:
-        payload = RGBDMsg.from_parts(parts)
-        if payload is None:
+        message = RGBDMsg.deserialize(payload)
+        if message is None:
             return None
 
         color = cv2.imdecode(
-            np.frombuffer(payload.color_image, np.uint8), cv2.IMREAD_COLOR
+            np.frombuffer(message.color_image, np.uint8), cv2.IMREAD_COLOR
         )
         depth = cv2.imdecode(
-            np.frombuffer(payload.depth_image, np.uint8), cv2.IMREAD_UNCHANGED
+            np.frombuffer(message.depth_image, np.uint8), cv2.IMREAD_UNCHANGED
         )
 
         if color is None or depth is None:

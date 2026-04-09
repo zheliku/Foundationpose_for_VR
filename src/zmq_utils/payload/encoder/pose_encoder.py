@@ -7,7 +7,7 @@ from ..message.pose import PoseMsg
 
 
 class PoseEncoder(BaseEncoder):
-    """Encode pose_server output to one-part JSON payload."""
+    """Encode pose_server output to single payload bytes."""
 
     def encode(
         self,
@@ -20,15 +20,27 @@ class PoseEncoder(BaseEncoder):
         fps: float,
         timing_ms: dict[str, float],
         pose_4x4: np.ndarray | None,
-    ) -> list[bytes]:
-        message = PoseMsg.from_runtime(
-            timestamp_ms=timestamp_ms,
-            stage=stage,
-            phase=phase,
-            det_count=det_count,
-            depth_valid_ratio=depth_valid_ratio,
-            fps=fps,
-            timing_ms=timing_ms,
-            pose_4x4=np.asarray(pose_4x4) if pose_4x4 is not None else None,
+    ) -> bytes | None:
+        timing = timing_ms or {}
+        pose_matrix_flat: list[float] | None = None
+        if pose_4x4 is not None:
+            pose_matrix_flat = [
+                float(item)
+                for item in np.asarray(pose_4x4, dtype=np.float64).reshape(16).tolist()
+            ]
+
+        message = PoseMsg(
+            timestamp_ms=float(timestamp_ms),
+            stage=int(stage),
+            phase=str(phase),
+            det_count=int(det_count),
+            depth_valid_ratio=float(depth_valid_ratio),
+            fps=float(fps),
+            has_pose=pose_matrix_flat is not None,
+            pose_matrix_flat=pose_matrix_flat,
+            yolo_ms=float(timing.get("yolo", 0.0)),
+            depth_ms=float(timing.get("depth", 0.0)),
+            cutie_ms=float(timing.get("cutie", 0.0)),
+            pose_ms=float(timing.get("pose", 0.0)),
         )
-        return [message.to_json_bytes()]
+        return message.serialize()

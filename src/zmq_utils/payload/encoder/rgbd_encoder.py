@@ -9,7 +9,7 @@ from ..message.rgbd import RGBDMsg
 
 
 class RGBDEncoder(BaseEncoder):
-    """Encode (color, depth) to [color_jpg, depth_png]."""
+    """Encode (color, depth) to single payload bytes."""
 
     def encode(
         self,
@@ -18,7 +18,7 @@ class RGBDEncoder(BaseEncoder):
         quality: int = 80,
         *args: object,
         **kwargs: object,
-    ) -> list[bytes] | None:
+    ) -> bytes | None:
         success, color_buf = cv2.imencode(
             ".jpg", color, [int(cv2.IMWRITE_JPEG_QUALITY), quality]
         )
@@ -33,4 +33,4 @@ class RGBDEncoder(BaseEncoder):
             color_image=color_buf.tobytes(),
             depth_image=depth_buf.tobytes(),
         )
-        return payload.to_parts()
+        return payload.serialize()

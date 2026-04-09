@@ -1,6 +1,6 @@
 # Foundationpose_for_VR 项目总交接文档（唯一入口）
 
-更新时间：2026-04-06
+更新时间：2026-04-09
 
 本文件是项目唯一长期维护的 AI 接手文档。历史会话文档已融合并清理，后续请只更新本文件。
 
@@ -98,14 +98,16 @@
 - debug_dir 空值崩溃、模块同名遮蔽、导出符号不稳定等问题均已修复。
 - Packed 单图策略存在质量/稳定性风险，调试基线优先 Dual 思路。
 
-## 8. 今日工作总结（2026-04-06）
+## 8. 工作日志（按日期）
 
-### 8.1 代码清理与架构收敛
+### 8.1 今日工作总结（2026-04-06）
+
+#### 8.1.1 代码清理与架构收敛
 
 - 清理了历史旧入口与过期测试依赖，主入口收敛到 pipeline 目录。
 - 统一改为“模块 API + pipeline 编排”模式，减少分散脚本。
 
-### 8.2 API 风格统一
+#### 8.1.2 API 风格统一
 
 - 移除了 Config 类中间层，改为直接参数调用。
 - 统一了 modules 与 pipeline 的类成员声明方式：
@@ -114,17 +116,92 @@
   - 中文注释
 - **init** 文档补齐并精简，默认值尽量下沉到类体。
 
-### 8.3 初始化与执行策略修正
+#### 8.1.3 初始化与执行策略修正
 
 - start() 职责收敛为启动与状态重置，不再做重初始化杂项。
 - Quest 链路保留在 **init** 完成 K 与 PoseEstimator 初始化。
 - RealSense 链路保留 run() 首帧懒初始化路径。
 
-### 8.4 调试显示修复
+#### 8.1.4 调试显示修复
 
 - 修复了 Quest/RealSense 窗口 HUD 文本溢出问题。
 - 将 fps 从累计均值改为实时帧率显示。
 - 合并 HUD 绘制方法，减少重复逻辑并统一样式。
+
+### 8.2 今日工作总结（2026-04-09）
+
+本次工作主要围绕「网络协议收敛 + MessagePack 全链路统一 + Windows/pixi 环境稳定化 + ONNX 导出回归验证」。
+
+#### 8.2.1 协议与通信层重构（Python）
+
+- 统一为单帧 payload 模式，移除多段 parts/multipart 兼容路径。
+- `PayloadSender`/`PayloadReceiver` 改为 single-payload 主接口：
+  - sender 统一发送 `bytes`；
+  - receiver 统一接收 `bytes`；
+  - Quest 接收侧启用 conflate/latest 语义，保留“只消费最新帧”的实时策略。
+- 删除旧统计与旧模式诊断路径：
+  - 移除 drained、`_sender_meta_count`、`_sender_no_meta_count` 等旧口径；
+  - 移除 `_infer_payload_mode` 及其调用。
+
+#### 8.2.2 序列化统一为 MessagePack（Python）
+
+- 以下消息模型已改为 MessagePack：
+  - `src/zmq_utils/payload/message/pose.py`
+  - `src/zmq_utils/payload/message/rgbd.py`
+  - `src/zmq_utils/payload/message/stereo.py`
+- `PoseMsg` API 已收口为仅保留 `serialize/deserialize`，不再保留 JSON 路径。
+- 编解码层同步改造：
+  - `src/zmq_utils/payload/encoder/base_encoder.py`
+  - `src/zmq_utils/payload/decoder/base_decoder.py`
+  - `src/zmq_utils/payload/encoder/pose_encoder.py`
+  - `src/zmq_utils/payload/decoder/pose_decoder.py`
+  - `src/zmq_utils/payload/encoder/rgbd_encoder.py`
+  - `src/zmq_utils/payload/decoder/rgbd_decoder.py`
+  - `src/zmq_utils/payload/decoder/stereo_decoder.py`
+
+#### 8.2.3 Unity 侧同步（C#）
+
+- Unity 网络层已同步到 MessagePack：
+  - `Assets/Scripts/Net/Payload/Message/PoseMsg.cs`
+  - `Assets/Scripts/Net/Payload/Message/RGBDMsg.cs`
+  - `Assets/Scripts/Net/Payload/Message/QuestStereoMsg.cs`
+- Unity 编解码器与收发器同步更新：
+  - `Assets/Scripts/Net/Communicate/PayloadSender.cs`
+  - `Assets/Scripts/Net/Communicate/PayloadReceiver.cs`
+  - `Assets/Scripts/Net/Payload/Encoder/*.cs`
+  - `Assets/Scripts/Net/Payload/Decoder/*.cs`
+- 删除旧 `TryDeserialize` 路径，反序列化入口收敛为 `Deserialize`。
+
+#### 8.2.4 Windows + pixi 环境排障与收敛
+
+- 目标：移除临时 pip 安装痕迹，恢复“全部由 pixi 管理”。
+- 处理过程：
+  - 清理并重建 `.pixi/envs/default`；
+  - 处理 Windows 文件锁问题（VS Code Black Formatter 的 Python LSP 占用环境文件）；
+  - 依赖声明确认：`pixi.toml` 现包含 `msgpack`、`onnx`、`pillow`（均由 pixi 解析与安装）。
+- 为解决 Windows 下 `torchvision -> PIL.Image` 导入链不稳定问题：
+  - 在 `Fast-FoundationStereo/core/foundation_stereo.py` 顶部预加载 Pillow。
+
+#### 8.2.5 ONNX 导出回归验证（已通过）
+
+- 验证命令（示例）：
+  - `pixi run python scripts/make_onnx.py --model_dir weights/20-30-48/model_best_bp2_serialize.pth --save_path output/`
+- 产物已生成：
+  - `Fast-FoundationStereo/output/feature_runner.onnx`
+  - `Fast-FoundationStereo/output/post_runner.onnx`
+  - `Fast-FoundationStereo/output/onnx.yaml`
+- 备注：脚本当前对 `save_path` 参数较敏感，建议使用目录形式并带尾部斜杠（如 `output/`）。
+
+#### 8.2.6 运行状态与观察
+
+- `src/pose_server.py` 在当前环境可持续运行并输出统计日志。
+- 统计字段中 `sender_raw` 数值很大属于跨进程/跨设备时钟基准差异，不应直接解释为真实网络延迟；优先关注 `sender_est` 与趋势变化。
+
+#### 8.2.7 当前改动规模（Foundationpose_for_VR 子仓）
+
+- 变更文件：19 个。
+- 变更量：457 insertions / 612 deletions。
+- 主体为协议收敛与旧兼容路径删除，属于“行为统一 + 技术债清理”型改造。
 
 ## 9. 后续 AI 接手建议
 
@@ -137,6 +214,13 @@
    - 深度有效率
    - 位姿稳定性
 4. 任何协议或显示字段变更，都同步更新本文件第 5 节。
+5. 若改动网络协议，必须 Python 与 Unity 同步改，避免单边兼容逻辑回流。
+6. 若需要重建 pixi 环境，先确认无 Python LSP/formatter 进程占用 `.pixi/envs/default`。
+7. ONNX 导出回归建议固定检查三项：
+
+- `feature_runner.onnx` 是否生成
+- `post_runner.onnx` 是否生成
+- `onnx.yaml` 是否生成
 
 ## 10. 文档维护规则
 
