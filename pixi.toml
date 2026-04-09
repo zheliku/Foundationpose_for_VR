@@ -70,6 +70,7 @@ ultralytics = ">=8.4.26, <9"
 msgpack = "*"
 onnx = ">=1.21.0, <2"
 pillow = ">=12, <13"
+clip = { git = "https://github.com/ultralytics/CLIP.git" }
 
 [target.win-64.pypi-dependencies]
 triton-windows = ">=3.6.0.post26, <4"
