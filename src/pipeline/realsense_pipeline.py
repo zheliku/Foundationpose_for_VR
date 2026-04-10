@@ -8,7 +8,6 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
 
 import cv2
 import numpy as np
@@ -26,13 +25,6 @@ from modules import (  # noqa: E402
     Yoloe26Masker,
 )
 from modules.cutie import CutieTracker  # noqa: E402
-
-try:
-    import pyrealsense2 as rs
-except ImportError as exc:  # pragma: no cover - 依赖本机 RealSense 环境
-    raise SystemExit("未找到 pyrealsense2，请先安装 RealSense Python SDK。") from exc
-
-rs_any = cast(Any, rs)
 
 THIS_FILE = Path(__file__).resolve()
 SRC_DIR = THIS_FILE.parent.parent
@@ -288,32 +280,6 @@ class RealSenseStereoPosePipeline:
         self.max_depth = float(args.max_depth)
         self.stats_interval = max(int(args.stats_interval), 1)
 
-    def _read_left_intrinsics_and_baseline(self) -> tuple[np.ndarray, float, float]:
-        """读取左目内参 K、双目 baseline、左目 fx。"""
-        if self.camera.pipeline is None:
-            raise RuntimeError("RealSense pipeline 不可用，请先 start()。")
-
-        profile = self.camera.pipeline.get_active_profile()
-        left_stream = profile.get_stream(
-            rs_any.stream.infrared, 1
-        ).as_video_stream_profile()
-        right_stream = profile.get_stream(
-            rs_any.stream.infrared, 2
-        ).as_video_stream_profile()
-
-        intr = left_stream.get_intrinsics()
-        extr = left_stream.get_extrinsics_to(right_stream)
-
-        baseline_m = abs(float(extr.translation[0]))
-        if baseline_m <= 0.0:
-            raise RuntimeError("无法读取有效 baseline。")
-
-        cam_k = np.array(
-            [[intr.fx, 0.0, intr.ppx], [0.0, intr.fy, intr.ppy], [0.0, 0.0, 1.0]],
-            dtype=np.float64,
-        )
-        return cam_k, baseline_m, float(intr.fx)
-
     def start(self) -> None:
         """启动 Pipeline：仅打开相机并重置运行状态。"""
         if self._started:
@@ -341,9 +307,17 @@ class RealSenseStereoPosePipeline:
     def _ensure_runtime_initialized(self) -> None:
         """按需初始化运行时参数；首次 run 时完成相机参数与 PoseEstimator 构建。"""
         if self.cam_k is None:
-            self.cam_k, self.baseline_m, self.fx = (
-                self._read_left_intrinsics_and_baseline()
+            calib = self.camera.get_stereo_calibration()
+            self.cam_k = np.array(
+                [
+                    [calib.fx, 0.0, calib.cx],
+                    [0.0, calib.fy, calib.cy],
+                    [0.0, 0.0, 1.0],
+                ],
+                dtype=np.float64,
             )
+            self.baseline_m = float(calib.baseline_m)
+            self.fx = float(calib.fx)
             logging.info(
                 "[RealSenseCalib] fx=%.3f fy=%.3f cx=%.3f cy=%.3f baseline=%.6fm",
                 float(self.cam_k[0, 0]),
@@ -388,7 +362,7 @@ class RealSenseStereoPosePipeline:
         if self.pose_estimator is not None:
             self.pose_estimator.reset()
 
-    def _maybe_log_stats(self, output: PosePipelineOutput) -> None:
+    def _log_stats_if_due(self, output: PosePipelineOutput) -> None:
         """按固定间隔打印统计信息，便于线上观察性能。"""
         if self._frame_count % self.stats_interval != 0:
             return
@@ -627,7 +601,7 @@ class RealSenseStereoPosePipeline:
             debug=debug_data,
         )
 
-        self._maybe_log_stats(output)
+        self._log_stats_if_due(output)
         return output
 
 

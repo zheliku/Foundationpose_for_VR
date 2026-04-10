@@ -7,6 +7,7 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 */
 
+#define _USE_MATH_DEFINES // 添加这一行
 
 #pragma once
 
@@ -27,7 +28,12 @@
 #include <Eigen/Geometry>
 #include <string>
 #include <limits.h>
-#include <unistd.h>
+#ifdef _WIN32
+    #define NOMINMAX // 添加这一行
+    #include <windows.h> // 包含 Windows 特定的头文件
+#else
+    #include <unistd.h>  // 包含 POSIX 特定的头文件
+#endif
 #include <memory>
 #include <math.h>
 #include <boost/format.hpp>

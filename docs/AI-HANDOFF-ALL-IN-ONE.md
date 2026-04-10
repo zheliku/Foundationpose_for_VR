@@ -1,6 +1,6 @@
 # Foundationpose_for_VR 项目总交接文档（唯一入口）
 
-更新时间：2026-04-09
+更新时间：2026-04-10
 
 本文件是项目唯一长期维护的 AI 接手文档。历史会话文档已融合并清理，后续请只更新本文件。
 
@@ -83,6 +83,40 @@
 - 统计日志字段：
   - rt_fps：实时平滑 fps
   - window_fps：统计窗口 fps（按 stats_interval 计算）
+
+### 5.3 Fast-FoundationStereo TRT 产物与命名口径（当前定义）
+
+- TRT/ONNX 命名已统一为参数标签，不再使用旧兼容命名：
+  - tag 规则：`h{height}-w{width}-it{valid_iters}-md{max_disp}`
+  - ONNX：`feature_runner-{tag}.onnx`、`post_runner-{tag}.onnx`
+  - Engine：`feature_runner-{tag}.{platform}.{precision}.engine`、`post_runner-{tag}.{platform}.{precision}.engine`
+- 兼容策略已收敛：
+  - 不再生成 legacy alias；
+  - 不再回退 legacy 文件名；
+  - 运行时仅按新命名匹配。
+- 配置口径已收敛：
+  - 不再导出 `onnx.yaml`；
+  - 运行时 TRT 配置由代码按当前参数构造（不依赖 YAML 元数据文件）。
+
+### 5.4 相机封装边界口径（当前定义）
+
+- RealSense：
+  - `pyrealsense2` 仅允许在 `src/modules/realsense.py` 内部使用；
+  - 调用方（modules/pipeline）统一通过 `RealSenseCamera.get_stereo_calibration()` 获取 `fx/fy/cx/cy/baseline/depth_scale`；
+  - 不应在调用方直接访问 `camera.pipeline`。
+- Quest：
+  - 标定读取职责已下沉到 `src/modules/quest_stereo.py`；
+  - 调用方统一通过 `QuestStereoCamera.get_stereo_calibration(calib_dir)` 获取标定对象；
+  - `quest_pipeline.py` 不再维护本地 `_load_calibration`。
+
+### 5.5 FFS 性能计时口径（当前定义）
+
+- `FastFoundationStereoRealtime.predict_depth(return_timing=True)` 中：
+  - `prep_ms`：输入预处理（numpy->tensor、缩放、维度转换等）；
+  - `forward_ms`：网络前向推理；
+  - `post_ms`：后处理（回 CPU、视差转深度、尺寸恢复等）；
+  - `infer_ms`：`prep + forward + post` 总耗时。
+- 因此，`infer_ms` 不是“纯模型 forward 时间”，与官方只统计 forward 的 profiling 脚本口径不同。
 
 ## 6. 关键工程约束
 
@@ -203,6 +237,83 @@
 - 变更量：457 insertions / 612 deletions。
 - 主体为协议收敛与旧兼容路径删除，属于“行为统一 + 技术债清理”型改造。
 
+### 8.3 今日工作总结（2026-04-10）
+
+本次工作主要围绕「Fast-FoundationStereo TRT 工程化收敛 + 命名规范统一 + 运行时结构简化」。
+
+#### 8.3.1 TRT 构建链路收敛（pixi 一键化）
+
+- `pixi.toml` 任务已整理为从 pth -> onnx -> engine 的一键链路（`pixi run build`）。
+- 构建范围覆盖 `weights` 下 3 个模型目录，并按多参数组批量导出（当前基线包含 640x480、valid_iters=4/8）。
+- 产物落地到各自权重目录，便于运行时按目录 + tag 精确选择。
+
+#### 8.3.2 导出与构建脚本规范化
+
+- `Fast-FoundationStereo/scripts/make_onnx.py` 与 `Fast-FoundationStereo/scripts/build_trt_engine.py` 已重构为清晰的 argparse 流程。
+- 输出命名全部改为 tag 化；已移除 legacy alias 及旧命名兼容分支。
+- `make_onnx.py` 已去除 `onnx.yaml` 生成逻辑，目录更干净。
+
+#### 8.3.3 TRT 运行时口径收敛（Python）
+
+- `src/modules/fast_foundationstereo.py` 已默认 TRT 优先，失败时按策略回退 PyTorch（`trt_strict` 可控）。
+- 运行时仅匹配新命名产物，不再使用旧文件名回退。
+- TRT 配置不再依赖 YAML 文件，改为运行时按参数构造，避免元数据文件分散。
+
+#### 8.3.4 FFS 模块代码结构重构与精简
+
+- `FastFoundationStereoRealtime` 已改为“统一调度 + 双后端类”结构：
+  - `_PyTorchStereoBackend`：PyTorch 模型加载与推理；
+  - `_TrtStereoBackend`：engine 匹配、runner 初始化与 TRT 推理。
+- 清理了若干一跳封装与重复辅助逻辑（如 trivial sync 封装），并将 TRT 专属工具函数内聚到 TRT 后端类。
+- 在不改变功能的前提下缩减行数并提升逻辑关联性与可读性。
+
+#### 8.3.5 TRT demo 脚本同步
+
+- `Fast-FoundationStereo/scripts/run_demo_tensorrt.py` 已同步到“无 YAML”模式。
+- demo 通过参数直接构造 tag 并定位 engine，行为与主线口径一致。
+
+### 8.4 今日工作总结补充（2026-04-10）
+
+本次补充主要围绕「相机封装边界修正 + Pipeline 命名与职责收敛 + FFS 参数对齐 + 性能口径澄清」。
+
+#### 8.4.1 RealSense 封装边界修正
+
+- 在 `src/modules/realsense.py` 新增 `StereoCalibration` 与 `get_stereo_calibration()`。
+- `src/modules/fast_foundationstereo.py` 的 main 示例已改为通过 `RealSenseCamera` 读取标定，移除直接 `pyrealsense2` 与 `camera.pipeline` 访问。
+- `src/pipeline/realsense_pipeline.py` 同步改为通过 `get_stereo_calibration()` 构造 K，不再在 pipeline 层触达 RealSense SDK 细节。
+
+#### 8.4.2 Quest 标定职责下沉与 API 统一
+
+- 在 `src/modules/quest_stereo.py` 新增 `QuestStereoCalibration` 与 `QuestStereoCamera.get_stereo_calibration(calib_dir)`，含目录级缓存。
+- `src/pipeline/quest_pipeline.py` 已删除本地 `_load_calibration`，统一改为调用相机模块提供的标定接口。
+- 模块导出已更新，`src/modules/__init__.py` 可直接导入 `QuestStereoCalibration`。
+
+#### 8.4.3 Pipeline 命名收敛
+
+- `realsense_pipeline.py` 与 `quest_pipeline.py` 中统计函数名由 `_maybe_log_stats` 统一改为 `_log_stats_if_due`，语义更明确。
+
+#### 8.4.4 Quest Pipeline FFS 参数与新版模块对齐
+
+- `src/pipeline/quest_pipeline.py` 的 FFS 默认权重切到 `20-30-48`。
+- 新增并透传以下参数到 `FastFoundationStereoRealtime`：
+  - `--ffs_seed`
+  - `--ffs_cudnn_benchmark`
+  - `--ffs_use_trt`
+  - `--ffs_trt_precision`
+  - `--ffs_trt_strict`
+  - `--ffs_trt_tag`
+  - `--ffs_trt_platform_tag`
+  - `--ffs_trt_feature_engine_path`
+  - `--ffs_trt_post_engine_path`
+
+#### 8.4.5 FFS 速度差异排查结论（重要）
+
+- 对 `20-30-48 + valid_iters=4` 的慢速现象进行了专项排查。
+- 关键结论：
+  - 当前业务脚本显示的 `infer_ms` 为总耗时（prep+forward+post），不是纯 forward；
+  - 文档表格是特定 profiling 条件下的基准值，不能直接与业务全链路 HUD 值等价比较；
+  - 在当前本机环境使用官方 `scripts/profile_speed.py` 复测，同配置平均约 `39.1ms`（warmup 后），与业务实测量级一致。
+
 ## 9. 后续 AI 接手建议
 
 建议按以下顺序开始：
@@ -216,11 +327,17 @@
 4. 任何协议或显示字段变更，都同步更新本文件第 5 节。
 5. 若改动网络协议，必须 Python 与 Unity 同步改，避免单边兼容逻辑回流。
 6. 若需要重建 pixi 环境，先确认无 Python LSP/formatter 进程占用 `.pixi/envs/default`。
-7. ONNX 导出回归建议固定检查三项：
+7. ONNX 导出回归建议固定检查两项：
 
 - `feature_runner.onnx` 是否生成
 - `post_runner.onnx` 是否生成
-- `onnx.yaml` 是否生成
+
+8. TRT 构建回归建议固定检查四项：
+
+- engine 文件是否带完整 tag（含 size/iters/max_disp）
+- 文件名是否包含平台标识（win/linux）
+- 文件名是否包含精度标识（fp16/fp32）
+- 运行时是否仅依赖新命名（无 legacy fallback）
 
 ## 10. 文档维护规则
 

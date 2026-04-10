@@ -71,6 +71,8 @@ msgpack = "*"
 onnx = ">=1.21.0, <2"
 pillow = ">=12, <13"
 clip = { git = "https://github.com/ultralytics/CLIP.git" }
+tensorrt-cu12 = ">=10.16.1.11, <11"
+
 
 [target.win-64.pypi-dependencies]
 triton-windows = ">=3.6.0.post26, <4"
@@ -85,12 +87,29 @@ gxx_linux-64 = "11.*"
 
 [tasks]
 # 编译 FoundationPose 的 C++ 扩展
-_build_fp = { cmd = """
+_build-fp = { cmd = """
 cmake -E rm -rf FoundationPose/mycpp/build &&
 cmake -S FoundationPose/mycpp -B FoundationPose/mycpp/build --fresh -G Ninja -DCMAKE_BUILD_TYPE=Release &&
 cmake --build FoundationPose/mycpp/build --parallel
 """ }
-build = { depends-on = ["_build_fp"] }
+_make-onnx = { cmd = """
+python Fast-FoundationStereo/scripts/make_onnx.py --model_dir Fast-FoundationStereo/weights/20-26-39/model_best_bp2_serialize.pth --save_path Fast-FoundationStereo/weights/20-26-39 --height 480 --width 640 --valid_iters 4 --max_disp 192 &&
+python Fast-FoundationStereo/scripts/make_onnx.py --model_dir Fast-FoundationStereo/weights/20-26-39/model_best_bp2_serialize.pth --save_path Fast-FoundationStereo/weights/20-26-39 --height 480 --width 640 --valid_iters 8 --max_disp 192 &&
+python Fast-FoundationStereo/scripts/make_onnx.py --model_dir Fast-FoundationStereo/weights/20-30-48/model_best_bp2_serialize.pth --save_path Fast-FoundationStereo/weights/20-30-48 --height 480 --width 640 --valid_iters 4 --max_disp 192 &&
+python Fast-FoundationStereo/scripts/make_onnx.py --model_dir Fast-FoundationStereo/weights/20-30-48/model_best_bp2_serialize.pth --save_path Fast-FoundationStereo/weights/20-30-48 --height 480 --width 640 --valid_iters 8 --max_disp 192 &&
+python Fast-FoundationStereo/scripts/make_onnx.py --model_dir Fast-FoundationStereo/weights/23-36-37/model_best_bp2_serialize.pth --save_path Fast-FoundationStereo/weights/23-36-37 --height 480 --width 640 --valid_iters 4 --max_disp 192 &&
+python Fast-FoundationStereo/scripts/make_onnx.py --model_dir Fast-FoundationStereo/weights/23-36-37/model_best_bp2_serialize.pth --save_path Fast-FoundationStereo/weights/23-36-37 --height 480 --width 640 --valid_iters 8 --max_disp 192
+""" }
+_build-trt = { cmd = """
+python Fast-FoundationStereo/scripts/build_trt_engine.py --onnx_dir Fast-FoundationStereo/weights/20-26-39 --height 480 --width 640 --valid_iters 4 --max_disp 192 --workspace_gb 4 --precision fp16 &&
+python Fast-FoundationStereo/scripts/build_trt_engine.py --onnx_dir Fast-FoundationStereo/weights/20-26-39 --height 480 --width 640 --valid_iters 8 --max_disp 192 --workspace_gb 4 --precision fp16 &&
+python Fast-FoundationStereo/scripts/build_trt_engine.py --onnx_dir Fast-FoundationStereo/weights/20-30-48 --height 480 --width 640 --valid_iters 4 --max_disp 192 --workspace_gb 4 --precision fp16 &&
+python Fast-FoundationStereo/scripts/build_trt_engine.py --onnx_dir Fast-FoundationStereo/weights/20-30-48 --height 480 --width 640 --valid_iters 8 --max_disp 192 --workspace_gb 4 --precision fp16 &&
+python Fast-FoundationStereo/scripts/build_trt_engine.py --onnx_dir Fast-FoundationStereo/weights/23-36-37 --height 480 --width 640 --valid_iters 4 --max_disp 192 --workspace_gb 4 --precision fp16 &&
+python Fast-FoundationStereo/scripts/build_trt_engine.py --onnx_dir Fast-FoundationStereo/weights/23-36-37 --height 480 --width 640 --valid_iters 8 --max_disp 192 --workspace_gb 4 --precision fp16
+""" }
+
+build = { depends-on = ["_build-fp", "_make-onnx", "_build-trt"] }
 
 demo-fp = { cmd = """
 python FoundationPose/run_demo.py \
@@ -100,11 +119,11 @@ python FoundationPose/run_demo.py \
 demo-ffs = { cmd = """
 cd Fast-FoundationStereo &&
 python scripts/run_demo.py \
---model_dir weights/23-36-37/model_best_bp2_serialize.pth \
---left_file demo_data/left.png \
---right_file demo_data/right.png \
---intrinsic_file demo_data/K.txt \
---out_dir output/ \
+--model_dir Fast-FoundationStereo/weights/23-36-37/model_best_bp2_serialize.pth \
+--left_file Fast-FoundationStereo/demo_data/left.png \
+--right_file Fast-FoundationStereo/demo_data/right.png \
+--intrinsic_file Fast-FoundationStereo/demo_data/K.txt \
+--out_dir Fast-FoundationStereo/output/ \
 --remove_invisible 0 \
 --denoise_cloud 1  \
 --scale 1 \
@@ -117,14 +136,14 @@ python scripts/run_demo.py \
 demo-ffs-fast = { cmd = """
 cd Fast-FoundationStereo &&
 python src/realsense_foundationstereo_test.py \
---model_dir weights/20-30-48/model_best_bp2_serialize.pth \
+--model_dir Fast-FoundationStereo/weights/20-30-48/model_best_bp2_serialize.pth \
 --valid_iters 4 \
 """ }
 
 demo-ffs-slow = { cmd = """
 cd Fast-FoundationStereo &&
 python src/realsense_foundationstereo_test.py \
---model_dir weights/23-36-37/model_best_bp2_serialize.pth \
+--model_dir Fast-FoundationStereo/weights/23-36-37/model_best_bp2_serialize.pth \
 --valid_iters 8 \
 """ }
 

@@ -17,8 +17,10 @@ Quest 双目网络输入 API（模块化版）
 
 from __future__ import annotations
 
+import json
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +38,71 @@ except ModuleNotFoundError:
         sys.path.append(str(src_root))
     from zmq_utils import PayloadReceiver, StereoDecoder
     from zmq_utils.payload.message.stereo import QuestStereoMsg
+
+
+@dataclass
+class QuestStereoCalibration:
+    """Quest 双目标定信息。"""
+
+    left_fx: float
+    left_fy: float
+    left_cx: float
+    left_cy: float
+    baseline_m: float
+    calib_width: int
+    calib_height: int
+
+    def _compute_center_crop_mapping(
+        self, width: int, height: int
+    ) -> tuple[float, float, float, float]:
+        """计算从标定坐标系到运行分辨率的中心裁剪+缩放映射。"""
+        src_w = float(max(self.calib_width, 1))
+        src_h = float(max(self.calib_height, 1))
+        dst_w = float(max(width, 1))
+        dst_h = float(max(height, 1))
+
+        src_aspect = src_w / src_h
+        dst_aspect = dst_w / dst_h
+
+        crop_x = 0.0
+        crop_y = 0.0
+        crop_w = src_w
+        crop_h = src_h
+
+        if abs(src_aspect - dst_aspect) > 1e-6:
+            if src_aspect > dst_aspect:
+                crop_w = src_h * dst_aspect
+                crop_x = (src_w - crop_w) * 0.5
+            else:
+                crop_h = src_w / dst_aspect
+                crop_y = (src_h - crop_h) * 0.5
+
+        sx = dst_w / max(crop_w, 1e-6)
+        sy = dst_h / max(crop_h, 1e-6)
+        return crop_x, crop_y, sx, sy
+
+    def scaled_k(
+        self, width: int, height: int, assume_center_crop: bool = True
+    ) -> np.ndarray:
+        """把标定内参映射到运行分辨率下的内参矩阵 K。"""
+        if assume_center_crop:
+            crop_x, crop_y, sx, sy = self._compute_center_crop_mapping(width, height)
+            cx = (self.left_cx - crop_x) * sx
+            cy = (self.left_cy - crop_y) * sy
+        else:
+            sx = width / max(self.calib_width, 1)
+            sy = height / max(self.calib_height, 1)
+            cx = self.left_cx * sx
+            cy = self.left_cy * sy
+
+        return np.array(
+            [
+                [self.left_fx * sx, 0.0, cx],
+                [0.0, self.left_fy * sy, cy],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float64,
+        )
 
 
 class QuestStereoCamera:
@@ -86,6 +153,7 @@ class QuestStereoCamera:
     _sender_delta_min_ms: float | None = None  # raw_delta 的历史最小值（偏移基线）。
     _sender_delta_raw_ema_ms: float = 0.0  # raw_delta 的平滑值。
     _sender_delay_est_ema_ms: float = 0.0  # 估计延迟的平滑值。
+    _calibration_cache: dict[str, QuestStereoCalibration]  # 标定缓存（按目录）。
 
     def __init__(
         self,
@@ -116,6 +184,53 @@ class QuestStereoCamera:
         self.endpoint = f"tcp://{self.listen_host}:{self.listen_port}"
 
         self.decoder = StereoDecoder()
+        self._calibration_cache = {}
+
+    def get_stereo_calibration(self, calib_dir: str | Path) -> QuestStereoCalibration:
+        """
+        读取 Quest 左右相机标定并计算 baseline。
+
+        参数：
+        - calib_dir: 标定目录，需包含左右相机 JSON 文件。
+        """
+        calib_path = Path(calib_dir).expanduser().resolve()
+        cache_key = str(calib_path)
+        if cache_key in self._calibration_cache:
+            return self._calibration_cache[cache_key]
+
+        left_path = calib_path / "left_camera_characteristics.json"
+        right_path = calib_path / "right_camera_characteristics.json"
+        if not left_path.is_file() or not right_path.is_file():
+            raise FileNotFoundError(f"标定文件缺失: {left_path} 或 {right_path}")
+
+        with left_path.open("r", encoding="utf-8") as left_file:
+            left = json.load(left_file)
+        with right_path.open("r", encoding="utf-8") as right_file:
+            right = json.load(right_file)
+
+        left_intr = left["intrinsics"]
+        left_t = np.array(left["pose"]["translation"], dtype=np.float64)
+        right_t = np.array(right["pose"]["translation"], dtype=np.float64)
+        baseline_m = float(np.linalg.norm(right_t - left_t))
+        if baseline_m <= 0.0:
+            raise RuntimeError("Quest baseline 无效，无法读取标定参数。")
+
+        sensor = left.get("sensor", {})
+        active = sensor.get("activeArraySize", {})
+        width = int(active.get("right", 1280) - active.get("left", 0))
+        height = int(active.get("bottom", 1280) - active.get("top", 0))
+
+        calib = QuestStereoCalibration(
+            left_fx=float(left_intr["fx"]),
+            left_fy=float(left_intr["fy"]),
+            left_cx=float(left_intr["cx"]),
+            left_cy=float(left_intr["cy"]),
+            baseline_m=baseline_m,
+            calib_width=width,
+            calib_height=height,
+        )
+        self._calibration_cache[cache_key] = calib
+        return calib
 
     def start(self) -> None:
         """启动网络接收器。"""

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import sys
 import time
@@ -23,6 +22,7 @@ from modules import (  # noqa: E402
     FastFoundationStereoRealtime,
     FoundationPoseEstimator,
     QuestStereoCamera,
+    QuestStereoCalibration,
     QuestStereoMsg,
     Yoloe26Masker,
 )
@@ -36,71 +36,6 @@ PROJECT_DIR = SRC_DIR.parent
 # =========================
 # 数据结构定义（输入/输出）
 # =========================
-
-
-@dataclass
-class StereoCalibration:
-    """Quest 双目标定信息。"""
-
-    left_fx: float
-    left_fy: float
-    left_cx: float
-    left_cy: float
-    baseline_m: float
-    calib_width: int
-    calib_height: int
-
-    def _compute_center_crop_mapping(
-        self, width: int, height: int
-    ) -> tuple[float, float, float, float]:
-        """计算从标定坐标系到运行分辨率的中心裁剪+缩放映射。"""
-        src_w = float(max(self.calib_width, 1))
-        src_h = float(max(self.calib_height, 1))
-        dst_w = float(max(width, 1))
-        dst_h = float(max(height, 1))
-
-        src_aspect = src_w / src_h
-        dst_aspect = dst_w / dst_h
-
-        crop_x = 0.0
-        crop_y = 0.0
-        crop_w = src_w
-        crop_h = src_h
-
-        if abs(src_aspect - dst_aspect) > 1e-6:
-            if src_aspect > dst_aspect:
-                crop_w = src_h * dst_aspect
-                crop_x = (src_w - crop_w) * 0.5
-            else:
-                crop_h = src_w / dst_aspect
-                crop_y = (src_h - crop_h) * 0.5
-
-        sx = dst_w / max(crop_w, 1e-6)
-        sy = dst_h / max(crop_h, 1e-6)
-        return crop_x, crop_y, sx, sy
-
-    def scaled_k(
-        self, width: int, height: int, assume_center_crop: bool = True
-    ) -> np.ndarray:
-        """把标定内参映射到运行分辨率下的内参矩阵 K。"""
-        if assume_center_crop:
-            crop_x, crop_y, sx, sy = self._compute_center_crop_mapping(width, height)
-            cx = (self.left_cx - crop_x) * sx
-            cy = (self.left_cy - crop_y) * sy
-        else:
-            sx = width / max(self.calib_width, 1)
-            sy = height / max(self.calib_height, 1)
-            cx = self.left_cx * sx
-            cy = self.left_cy * sy
-
-        return np.array(
-            [
-                [self.left_fx * sx, 0.0, cx],
-                [0.0, self.left_fy * sy, cy],
-                [0.0, 0.0, 1.0],
-            ],
-            dtype=np.float64,
-        )
 
 
 @dataclass
@@ -268,7 +203,7 @@ class QuestStereoPosePipeline:
 
     # 运行期对象与标定状态。
     pose_estimator: FoundationPoseEstimator | None = None  # FoundationPose 估计器。
-    calib: StereoCalibration | None = None  # Quest 标定参数。
+    calib: QuestStereoCalibration | None = None  # Quest 标定参数。
     cam_k: np.ndarray | None = None  # 映射到运行分辨率后的相机内参 K。
     fx: float = 0.0  # 当前帧使用的焦距 fx。
     frame_w: int = 0  # 运行分辨率宽度。
@@ -337,7 +272,7 @@ class QuestStereoPosePipeline:
         self.stats_interval = max(int(args.stats_interval), 1)
 
         # 标定文件在构建阶段读入一次，后续不再变化。
-        self.calib = self._load_calibration(Path(self.args.calib_dir))
+        self.calib = self.camera.get_stereo_calibration(Path(self.args.calib_dir))
         logging.info(
             "[QuestCalib] fx=%.3f fy=%.3f cx=%.3f cy=%.3f baseline=%.6fm calib=%dx%d",
             self.calib.left_fx,
@@ -386,38 +321,6 @@ class QuestStereoPosePipeline:
             symmetry_tfs=self.symmetry_tfs,
             debug=0,
             debug_dir=None,
-        )
-
-    def _load_calibration(self, calib_dir: Path) -> StereoCalibration:
-        """加载 Quest 左右相机标定并计算 baseline。"""
-        # 直接读取 JSON，避免对简单逻辑再封装一层方法。
-        with (calib_dir / "left_camera_characteristics.json").open(
-            "r", encoding="utf-8"
-        ) as left_file:
-            left = json.load(left_file)
-        with (calib_dir / "right_camera_characteristics.json").open(
-            "r", encoding="utf-8"
-        ) as right_file:
-            right = json.load(right_file)
-
-        left_intr = left["intrinsics"]
-        left_t = np.array(left["pose"]["translation"], dtype=np.float64)
-        right_t = np.array(right["pose"]["translation"], dtype=np.float64)
-        baseline_m = float(np.linalg.norm(right_t - left_t))
-
-        sensor = left.get("sensor", {})
-        active = sensor.get("activeArraySize", {})
-        width = int(active.get("right", 1280) - active.get("left", 0))
-        height = int(active.get("bottom", 1280) - active.get("top", 0))
-
-        return StereoCalibration(
-            left_fx=float(left_intr["fx"]),
-            left_fy=float(left_intr["fy"]),
-            left_cx=float(left_intr["cx"]),
-            left_cy=float(left_intr["cy"]),
-            baseline_m=baseline_m,
-            calib_width=width,
-            calib_height=height,
         )
 
     @staticmethod
@@ -517,7 +420,7 @@ class QuestStereoPosePipeline:
         if self.pose_estimator is not None:
             self.pose_estimator.reset()
 
-    def _maybe_log_stats(self, output: PosePipelineOutput) -> None:
+    def _log_stats_if_due(self, output: PosePipelineOutput) -> None:
         """按固定间隔打印统计信息，便于线上观察性能。"""
         if self._frame_count % self.stats_interval != 0:
             return
@@ -777,7 +680,7 @@ class QuestStereoPosePipeline:
             debug=debug_data,
         )
 
-        self._maybe_log_stats(output)
+        self._log_stats_if_due(output)
         return output
 
 
@@ -929,6 +832,64 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="FFS 体构建优化后端：triton 或 pytorch1。",
     )
     parser.add_argument(
+        "--ffs_seed",
+        type=int,
+        default=-1,
+        help="FFS 随机种子；<0 为速度优先模式，>=0 为确定性模式。",
+    )
+    parser.add_argument(
+        "--ffs_cudnn_benchmark",
+        type=int,
+        default=1,
+        choices=[0, 1],
+        help="FFS 是否开启 cudnn.benchmark（1=开启，0=关闭）。",
+    )
+    parser.add_argument(
+        "--ffs_use_trt",
+        type=int,
+        default=0,
+        choices=[0, 1],
+        help="是否优先使用 TensorRT 路径（1=启用，0=关闭）。",
+    )
+    parser.add_argument(
+        "--ffs_trt_precision",
+        type=str,
+        default="fp16",
+        choices=["fp16", "fp32"],
+        help="TRT engine 精度标签。",
+    )
+    parser.add_argument(
+        "--ffs_trt_strict",
+        type=int,
+        default=0,
+        choices=[0, 1],
+        help="TRT 依赖/资源缺失时是否直接报错（1=严格模式）。",
+    )
+    parser.add_argument(
+        "--ffs_trt_tag",
+        type=str,
+        default="",
+        help="TRT artifact tag；为空时按输入尺寸与参数自动拼接。",
+    )
+    parser.add_argument(
+        "--ffs_trt_platform_tag",
+        type=str,
+        default="",
+        help="TRT 平台标签（如 win/linux）；为空时自动识别。",
+    )
+    parser.add_argument(
+        "--ffs_trt_feature_engine_path",
+        type=str,
+        default="",
+        help="TRT feature engine 绝对路径；为空时按 tag 自动匹配。",
+    )
+    parser.add_argument(
+        "--ffs_trt_post_engine_path",
+        type=str,
+        default="",
+        help="TRT post engine 绝对路径；为空时按 tag 自动匹配。",
+    )
+    parser.add_argument(
         "--min_depth",
         type=float,
         default=0.1,
@@ -1035,6 +996,15 @@ def build_quest_pipeline(args: argparse.Namespace) -> QuestStereoPosePipeline:
         valid_iters=int(args.ffs_valid_iters),
         max_disp=int(args.ffs_max_disp),
         optimize_build_volume=str(args.ffs_optimize_build_volume),
+        seed=int(args.ffs_seed),
+        cudnn_benchmark=bool(args.ffs_cudnn_benchmark),
+        use_trt=bool(args.ffs_use_trt),
+        trt_precision=str(args.ffs_trt_precision),
+        trt_strict=bool(args.ffs_trt_strict),
+        trt_tag=str(args.ffs_trt_tag),
+        trt_platform_tag=str(args.ffs_trt_platform_tag),
+        trt_feature_engine_path=str(args.ffs_trt_feature_engine_path),
+        trt_post_engine_path=str(args.ffs_trt_post_engine_path),
     )
 
     use_2d_tracker = bool(args.activate_2d_tracker)

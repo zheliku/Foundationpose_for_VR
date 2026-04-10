@@ -58,6 +58,21 @@ class RGBDFrame:
     timestamp_ms: float
 
 
+@dataclass
+class StereoCalibration:
+    """双目标定与深度尺度参数。"""
+
+    # 左目焦距与主点。
+    fx: float
+    fy: float
+    cx: float
+    cy: float
+    # 左右相机基线（米）。
+    baseline_m: float
+    # 深度 z16 到米的缩放因子。
+    depth_scale: float
+
+
 class RealSenseCamera:
     """
     RealSense 相机最小可用 API。
@@ -286,6 +301,43 @@ class RealSenseCamera:
         timestamp_ms = float(color_frame.get_timestamp())
 
         return RGBDFrame(color_bgr=color_bgr, depth=depth, timestamp_ms=timestamp_ms)
+
+    def get_stereo_calibration(self) -> StereoCalibration:
+        """
+        读取当前 RealSense 双目标定参数与深度尺度。
+
+        返回：
+        - StereoCalibration：包含 fx/fy/cx/cy、baseline 与 depth_scale。
+
+        说明：
+        - 该方法用于上层算法读取标定，不需要直接访问 pipeline 或 pyrealsense2。
+        """
+        if not self._started or self.pipeline is None:
+            raise RuntimeError("RealSenseCamera 尚未启动，请先调用 start()。")
+
+        profile = self.pipeline.get_active_profile()
+        left_video = profile.get_stream(rs.stream.infrared, 1).as_video_stream_profile()
+        right_video = profile.get_stream(
+            rs.stream.infrared, 2
+        ).as_video_stream_profile()
+
+        intr = left_video.get_intrinsics()
+        extr = left_video.get_extrinsics_to(right_video)
+        baseline_m = abs(float(extr.translation[0]))
+        if baseline_m <= 0.0:
+            raise RuntimeError("RealSense baseline 无效，无法读取标定参数。")
+
+        depth_sensor = profile.get_device().first_depth_sensor()
+        depth_scale = float(depth_sensor.get_depth_scale())
+
+        return StereoCalibration(
+            fx=float(intr.fx),
+            fy=float(intr.fy),
+            cx=float(intr.ppx),
+            cy=float(intr.ppy),
+            baseline_m=baseline_m,
+            depth_scale=depth_scale,
+        )
 
     def __enter__(self) -> "RealSenseCamera":
         """上下文管理：进入 with 时自动启动。"""
