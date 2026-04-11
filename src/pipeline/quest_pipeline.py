@@ -847,7 +847,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--ffs_use_trt",
         type=int,
-        default=0,
+        default=1,
         choices=[0, 1],
         help="是否优先使用 TensorRT 路径（1=启用，0=关闭）。",
     )

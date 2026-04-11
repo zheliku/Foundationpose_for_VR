@@ -50,7 +50,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--pose_topic",
         type=str,
-        default="payload",
+        default="pose",
         help="发布消息的 topic 名称。Unity 端若启用 topic 过滤，需与此值保持一致。",
     )
     parser.add_argument(
