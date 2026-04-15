@@ -315,28 +315,6 @@ class FoundationPoseEstimator:
         )
         return np.asarray(pose).reshape(4, 4)
 
-    def estimate(
-        self,
-        rgb: np.ndarray,
-        depth: np.ndarray,
-        init_mask: np.ndarray | None = None,
-    ) -> np.ndarray:
-        """
-        统一入口：未初始化走 register，已初始化走 track。
-
-        输入：
-        - rgb/depth: 当前帧 RGBD。
-        - init_mask: 仅第一帧需要。
-
-        输出：
-        - pose: 4x4 位姿矩阵。
-        """
-        if not self._initialized:
-            if init_mask is None:
-                raise ValueError("首次 estimate 需要提供 init_mask。")
-            return self.register(rgb, depth, init_mask)
-        return self.track(rgb, depth)
-
     def visualize_pose(
         self,
         rgb: np.ndarray,
