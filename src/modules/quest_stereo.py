@@ -30,14 +30,14 @@ import numpy as np
 try:
     # 常规包导入路径。
     from zmq_utils import PayloadReceiver, StereoDecoder
-    from zmq_utils.payload.message.stereo import QuestStereoMsg
+    from zmq_utils.payload.message.quest_stereo_msg import QuestStereoMsg
 except ModuleNotFoundError:
     # 兼容直接运行 src/modules/quest_stereo.py 的场景。
     src_root = Path(__file__).resolve().parents[1]
     if str(src_root) not in sys.path:
         sys.path.append(str(src_root))
     from zmq_utils import PayloadReceiver, StereoDecoder
-    from zmq_utils.payload.message.stereo import QuestStereoMsg
+    from zmq_utils.payload.message.quest_stereo_msg import QuestStereoMsg
 
 
 @dataclass

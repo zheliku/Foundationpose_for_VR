@@ -5,7 +5,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .base_encoder import BaseEncoder
-from ..message.rgbd import RGBDMsg
+from ..message.rgbd_msg import RGBDMsg
 
 
 class RGBDEncoder(BaseEncoder):

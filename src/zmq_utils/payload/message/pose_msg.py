@@ -11,6 +11,7 @@ class PoseMsg:
     """Pose 传输消息：用于 pose 编码器与解码器之间统一交换。"""
 
     timestamp_ms: float  # 该条消息时间戳（毫秒）。
+    frame_id: int  # 对应输入双目帧号（用于 Unity 本地匹配发送时参考位姿）。
     stage: int  # Pipeline 阶段编号。
     phase: str  # 阶段名称（例如 REGISTER / TRACK）。
     det_count: int  # 检测框数量。
@@ -40,6 +41,7 @@ class PoseMsg:
 
             return cls(
                 timestamp_ms=float(data.get("timestamp_ms", 0.0)),
+                frame_id=int(data.get("frame_id", 0)),
                 stage=int(data.get("stage", 0)),
                 phase=str(data.get("phase", "")),
                 det_count=int(data.get("det_count", 0)),
@@ -59,6 +61,7 @@ class PoseMsg:
         """编码为 MessagePack 字节。"""
         payload = {
             "timestamp_ms": float(self.timestamp_ms),
+            "frame_id": int(self.frame_id),
             "stage": int(self.stage),
             "phase": str(self.phase),
             "det_count": int(self.det_count),

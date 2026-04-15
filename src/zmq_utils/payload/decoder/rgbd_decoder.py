@@ -7,7 +7,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .base_decoder import PayloadDecoder
-from ..message.rgbd import RGBDMsg
+from ..message.rgbd_msg import RGBDMsg
 
 
 class RGBDDecoder(PayloadDecoder):

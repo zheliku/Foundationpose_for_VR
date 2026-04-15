@@ -7,7 +7,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .base_decoder import PayloadDecoder
-from ..message.stereo import QuestStereoMsg
+from ..message.quest_stereo_msg import QuestStereoMsg
 
 
 class StereoDecoder(PayloadDecoder):

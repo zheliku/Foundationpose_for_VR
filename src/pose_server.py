@@ -275,6 +275,7 @@ def run_pose_server(args: argparse.Namespace) -> None:
             # 3) 编码协议负载：统一字段结构，便于 Unity 端稳定解码。
             payload = encoder.encode(
                 timestamp_ms=output.timestamp_ms,
+                frame_id=int(output.frame_id or 0),
                 stage=output.stage,
                 phase=output.phase,
                 det_count=output.det_count,

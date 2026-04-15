@@ -63,6 +63,7 @@ class PosePipelineOutput:
     """Pipeline API 输出：面向外部传输和上层业务。"""
 
     timestamp_ms: float
+    frame_id: int | None
     stage: int
     phase: str
     det_count: int
@@ -670,6 +671,7 @@ class QuestStereoPosePipeline:
 
         output = PosePipelineOutput(
             timestamp_ms=stereo_timestamp_ms,
+            frame_id=stereo.frame_id,
             stage=self.stage,
             phase=phase,
             det_count=det_count,

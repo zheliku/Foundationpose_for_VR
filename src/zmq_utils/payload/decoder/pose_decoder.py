@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from .base_decoder import PayloadDecoder
-from ..message.pose import PoseMsg
+from ..message.pose_msg import PoseMsg
 
 
 class PoseDecoder(PayloadDecoder):

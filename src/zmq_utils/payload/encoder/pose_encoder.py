@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from .base_encoder import BaseEncoder
-from ..message.pose import PoseMsg
+from ..message.pose_msg import PoseMsg
 
 
 class PoseEncoder(BaseEncoder):
@@ -13,6 +13,7 @@ class PoseEncoder(BaseEncoder):
         self,
         *,
         timestamp_ms: float,
+        frame_id: int,
         stage: int,
         phase: str,
         det_count: int,
@@ -31,6 +32,7 @@ class PoseEncoder(BaseEncoder):
 
         message = PoseMsg(
             timestamp_ms=float(timestamp_ms),
+            frame_id=int(frame_id),
             stage=int(stage),
             phase=str(phase),
             det_count=int(det_count),
