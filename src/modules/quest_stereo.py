@@ -9,7 +9,8 @@ Quest 双目网络输入 API（模块化版）
 说明：
 - 输入来自 Unity 的 QuestStereoEncoder + PayloadSender。
 - 单帧 MessagePack 协议：
-    - image_jpeg(bytes)
+    - left_image_jpeg(bytes)
+    - right_image_jpeg(bytes)
     - frame_id(int)
     - sender_mono_ms(float)
     - unity_frame(int)
@@ -241,7 +242,6 @@ class QuestStereoCamera:
             self.endpoint,
             hwm=self.hwm,
             bind=True,
-            conflate=True,
         )
 
         self._started = True

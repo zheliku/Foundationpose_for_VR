@@ -35,7 +35,6 @@ class PayloadReceiver:
     # 协议与订阅配置。
     use_topic: bool  # 是否启用 topic 前缀模式（SUB）。
     topic: str  # use_topic=True 时订阅的 topic。
-    conflate: bool  # 是否启用 CONFLATE（仅保留最新消息）。
 
     def __init__(
         self,
@@ -44,7 +43,6 @@ class PayloadReceiver:
         bind: bool = True,
         use_topic: bool = False,
         topic: str = "",
-        conflate: bool = False,
     ) -> None:
         # 仅做必要初始化：保存配置并创建 socket。
         self.ctx = zmq.Context.instance()
@@ -54,7 +52,6 @@ class PayloadReceiver:
         self.is_bind = bind
         self.use_topic = use_topic
         self.topic = topic
-        self.conflate = bool(conflate)
         self._setup_socket()
 
     def _setup_socket(self) -> None:
@@ -62,9 +59,6 @@ class PayloadReceiver:
         socket_type = zmq.SUB if self.use_topic else zmq.PULL
         self.socket = self.ctx.socket(socket_type)
         self.socket.set_hwm(self.hwm)
-
-        if self.conflate:
-            self.socket.setsockopt(zmq.CONFLATE, 1)
 
         if self.use_topic:
             self.socket.setsockopt_string(zmq.SUBSCRIBE, self.topic)
@@ -104,15 +98,6 @@ class PayloadReceiver:
             return None
 
         try:
-            if self.conflate:
-                if timeout_ms != -1 and not self.socket.poll(
-                    timeout=max(int(timeout_ms), 0)
-                ):
-                    return None
-
-                msg = self._recv_frame_once(nonblock=False)
-                return msg
-
             if timeout_ms == -1:
                 msg = self._recv_frame_once(nonblock=False)
             else:
@@ -126,7 +111,7 @@ class PayloadReceiver:
             if msg is None:
                 return None
 
-            # 非 conflate 场景下主动 drain 队列，仅保留最新消息。
+            # 主动 drain 队列，仅保留最新消息。
             while True:
                 try:
                     next_msg = self._recv_frame_once(nonblock=True)
