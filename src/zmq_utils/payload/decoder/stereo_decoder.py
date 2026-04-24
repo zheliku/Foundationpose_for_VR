@@ -19,18 +19,18 @@ class StereoDecoder(PayloadDecoder):
         if message is None:
             return None
 
-        # 新协议：左右图独立 JPEG，直接分别解码。
-        if message.left_image_jpeg is not None and message.right_image_jpeg is not None:
-            left = cv2.imdecode(
-                np.frombuffer(message.left_image_jpeg, np.uint8), cv2.IMREAD_COLOR
-            )
-            right = cv2.imdecode(
-                np.frombuffer(message.right_image_jpeg, np.uint8), cv2.IMREAD_COLOR
-            )
-            if left is None or right is None:
-                return None
-            message.left = cast(NDArray[np.uint8], left)
-            message.right = cast(NDArray[np.uint8], right)
-            return message
+        if message.left_image_jpeg is None or message.right_image_jpeg is None:
+            return None
 
-        return None
+        left = cv2.imdecode(
+            np.frombuffer(message.left_image_jpeg, np.uint8), cv2.IMREAD_COLOR
+        )
+        right = cv2.imdecode(
+            np.frombuffer(message.right_image_jpeg, np.uint8), cv2.IMREAD_COLOR
+        )
+        if left is None or right is None:
+            return None
+
+        message.left = cast(NDArray[np.uint8], left)
+        message.right = cast(NDArray[np.uint8], right)
+        return message

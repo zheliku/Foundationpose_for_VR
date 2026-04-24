@@ -1,6 +1,6 @@
 # Foundationpose_for_VR 项目总交接文档（唯一入口）
 
-更新时间：2026-04-10
+更新时间：2026-04-24
 
 本文件是项目唯一长期维护的 AI 接手文档。历史会话文档已融合并清理，后续请只更新本文件。
 
@@ -15,8 +15,9 @@
 ### 2.1 Quest 链路
 
 - 入口脚本：src/pipeline/quest_pipeline.py
-- 数据流：QuestStereoCamera -> Yoloe26Masker -> FastFoundationStereoRealtime -> FoundationPoseEstimator
+- 数据流：QuestReceiver（双 topic SUB: quest_stereo + quest_camera_info） -> Yoloe26Masker -> FastFoundationStereoRealtime -> FoundationPoseEstimator
 - 可选增强：CutieTracker 用于 2D 跟踪引导
+- 标定来源：默认从网络 camera_info 消息获取（camera_source=network），也可从本地缓存/标定目录加载（camera_source=local）
 
 ### 2.2 RealSense 链路
 
@@ -36,7 +37,7 @@
 ### 3.1 核心模块目录
 
 - src/modules/realsense.py
-- src/modules/quest_stereo.py
+- src/modules/quest_io.py
 - src/modules/yoloe26.py
 - src/modules/fast_foundationstereo.py
 - src/modules/foundationpose.py
@@ -49,12 +50,14 @@
 
 ### 3.3 已清理的旧入口/旧链路（不要恢复）
 
-- src/pose_server.py
 - src/pose_tracker_api.py
 - src/vpt_cli.py
 - src/VOT.py
 - src/zmq_utils/timing.py
 - src/zmq_utils/latency.py
+- src/modules/quest_stereo.py（已重命名为 quest_io.py）
+- src/modules/quest_receiver.py（已重命名为 quest_io.py）
+- Assets/Scripts/Net/Payload/Encoder/StaticStereoEncoder.cs（旧测试用编码器，已删除）
 
 ## 4. 运行方式（常用）
 
@@ -84,7 +87,33 @@
   - rt_fps：实时平滑 fps
   - window_fps：统计窗口 fps（按 stats_interval 计算）
 
-### 5.3 Fast-FoundationStereo TRT 产物与命名口径（当前定义）
+### 5.3 Quest 双 Topic 通信口径（当前定义）
+
+- Unity 侧 PayloadSender 统一使用 PUB 模式，支持多个 SenderEntry（encoder + topic + targetFps）。
+- Unity 侧 PayloadReceiver 统一使用 SUB 模式，支持多个 ReceiverEntry（topic + decoder），后台线程 drain 时按 topic 分别缓存最新帧。
+- Python 侧 PayloadSender 统一 PUB 模式，send_payload 必须指定 topic。
+- Python 侧 PayloadReceiver 统一 SUB 模式：
+  - recv_all_latest_by_topic：按 topic 分别 drain，返回 {topic: payload} 字典，适合多 topic 场景。
+  - recv_frame_latest：不区分 topic drain，仅适合单 topic 场景。
+- Topic 名称约定：
+  - quest_stereo：双目图像帧（高频，约 10fps）。
+  - quest_camera_info：相机静态标定信息（低频，约 1fps，内容通常不变）。
+  - pose：位姿结果（服务端发布，Unity 接收）。
+
+### 5.4 Camera Info 缓存策略（当前定义）
+
+- pose_server 每次接收到 quest_camera_info 消息后：
+  - 与本地 camera_info_latest.json 比较。
+  - 若内容不同 → 备份旧版为 camera_info_<timestamp>.json，保存新版。
+  - 若内容相同 → 仅更新 _received_at 时间戳。
+- Pipeline 启动时：
+  - camera_source=local → 优先从缓存目录/标定目录加载，无缓存时等待网络。
+  - camera_source=network → 仅等待网络 camera_info 消息。
+- QuestStereoCalibration 构造方式：
+  - QuestCameraInfoMsg.from_camera_info_msg()：从网络消息构造。
+  - QuestStereoCalibration.from_local_json()：从本地 JSON 构造（旧工作流兼容）。
+
+### 5.5 Fast-FoundationStereo TRT 产物与命名口径（当前定义）
 
 - TRT/ONNX 命名已统一为参数标签，不再使用旧兼容命名：
   - tag 规则：`h{height}-w{width}-it{valid_iters}-md{max_disp}`
@@ -98,18 +127,18 @@
   - 不再导出 `onnx.yaml`；
   - 运行时 TRT 配置由代码按当前参数构造（不依赖 YAML 元数据文件）。
 
-### 5.4 相机封装边界口径（当前定义）
+### 5.6 相机封装边界口径（当前定义）
 
 - RealSense：
   - `pyrealsense2` 仅允许在 `src/modules/realsense.py` 内部使用；
   - 调用方（modules/pipeline）统一通过 `RealSenseCamera.get_stereo_calibration()` 获取 `fx/fy/cx/cy/baseline/depth_scale`；
   - 不应在调用方直接访问 `camera.pipeline`。
 - Quest：
-  - 标定读取职责已下沉到 `src/modules/quest_stereo.py`；
-  - 调用方统一通过 `QuestStereoCamera.get_stereo_calibration(calib_dir)` 获取标定对象；
+  - 标定读取职责已下沉到 `src/modules/quest_io.py`；
+  - 调用方统一通过 `QuestReceiver.get_calibration()` 获取标定对象；
   - `quest_pipeline.py` 不再维护本地 `_load_calibration`。
 
-### 5.5 FFS 性能计时口径（当前定义）
+### 5.7 FFS 性能计时口径（当前定义）
 
 - `FastFoundationStereoRealtime.predict_depth(return_timing=True)` 中：
   - `prep_ms`：输入预处理（numpy->tensor、缩放、维度转换等）；
@@ -272,7 +301,59 @@
 - `Fast-FoundationStereo/scripts/run_demo_tensorrt.py` 已同步到“无 YAML”模式。
 - demo 通过参数直接构造 tag 并定位 engine，行为与主线口径一致。
 
-### 8.4 今日工作总结补充（2026-04-10）
+### 8.4 今日工作总结（2026-04-24）
+
+本次工作主要围绕「Quest 双 Topic 通信重构 + Sender/Receiver 多 topic 架构统一 + Camera Info 缓存策略 + 旧兼容清理」。
+
+#### 8.4.1 新增 QuestCameraInfoMsg 消息（Python + C#）
+
+- Python: src/zmq_utils/payload/message/quest_camera_info_msg.py
+- C#: Assets/Scripts/Net/Payload/Message/QuestCameraInfoMsg.cs
+- 包含左右目内参、畸变、基线、传感器分辨率、有效阵列区域、当前分辨率、帧率、镜头偏移位置/旋转等所有静态信息。
+
+#### 8.4.2 新增编码器/解码器
+
+- C# QuestCameraInfoEncoder: Assets/Scripts/Net/Payload/Encoder/QuestCameraInfoEncoder.cs
+  - 带摘要缓存，仅当相机信息变化时重新编码。
+- Python CameraInfoDecoder: src/zmq_utils/payload/decoder/camera_info_decoder.py
+
+#### 8.4.3 PayloadSender/PayloadReceiver 多 Topic 重构（C# + Python）
+
+- C# PayloadSender：改为 List<SenderEntry> 配置，每个 Entry 独立编码器+topic+帧率，统一 PUB 模式。
+- C# PayloadReceiver：改为 List<ReceiverEntry> 配置，每个 Entry 独立 topic+解码器，统一 SUB 模式，按 topic 路由分发。
+- Python PayloadSender：移除 PUSH 模式和 default_topic，统一 PUB，topic 必填。
+- Python PayloadReceiver：移除 PULL 模式，统一 SUB，支持多 topics 订阅，recv_frame_latest 返回 (topic, payload) 元组。
+
+#### 8.4.4 quest_stereo.py → quest_receiver.py 重命名与重构
+
+- QuestStereoCamera → QuestReceiver，支持双 topic 接收。
+- 新增 poll_all() 方法：轮询所有 topic 并更新缓存。
+- 新增 get_camera_info() / get_calibration() 接口。
+- QuestStereoCalibration 新增 from_camera_info_msg() 和 from_local_json() 类方法。
+- 移除本地文件读取的 get_stereo_calibration(calib_dir) 旧接口。
+
+#### 8.4.5 quest_pipeline.py 懒初始化改造
+
+- 标定初始化改为懒初始化：camera_source=network 时等待网络 camera_info，camera_source=local 时优先本地。
+- 新增 _init_from_calibration / _try_init_from_network 内部方法。
+- 新增 --camera_source 和 --camera_cache_dir 命令行参数。
+
+#### 8.4.6 pose_server.py 双 Topic 处理 + 缓存
+
+- 运行时监控 camera_info 变化并自动保存到本地缓存目录。
+- 内容变化时备份旧版，保存新版。
+- PayloadSender.send_payload 调用已改为必须传入 topic 参数。
+
+#### 8.4.7 旧兼容代码清理
+
+- QuestStereoMsg：移除 packed_image_jpeg_legacy 字段和旧协议反序列化分支。
+- StereoDecoder：移除旧协议解码分支。
+- PayloadSender.cs：移除 PUSH 模式和 SenderUseTopicLegacyPrefKey 旧键。
+- PayloadReceiver.cs：移除 PULL 模式和 RawPayloadEvent。
+- 删除 StaticStereoEncoder.cs（旧测试用编码器，无引用）。
+- 删除 quest_stereo.py（已重命名为 quest_receiver.py）。
+
+### 8.5 今日工作总结补充（2026-04-10）
 
 本次补充主要围绕「相机封装边界修正 + Pipeline 命名与职责收敛 + FFS 参数对齐 + 性能口径澄清」。
 
@@ -314,6 +395,36 @@
   - 文档表格是特定 profiling 条件下的基准值，不能直接与业务全链路 HUD 值等价比较；
   - 在当前本机环境使用官方 `scripts/profile_speed.py` 复测，同配置平均约 `39.1ms`（warmup 后），与业务实测量级一致。
 
+### 8.6 今日工作总结（2026-04-24 补充）
+
+本次补充主要围绕「修复双 Topic drain bug + 完善消息字段 + 新增编解码器 + 模块重命名」。
+
+#### 8.6.1 修复 PayloadReceiver 跨 Topic Drain Bug
+
+- Python PayloadReceiver 新增 `recv_all_latest_by_topic` 方法：按 topic 分别 drain，返回每个 topic 的最新 payload 字典。
+- 原 `recv_frame_latest` 不区分 topic drain，标记为单 topic 场景专用。
+- C# PayloadReceiver 的 ReceiveLoop 修复：drain 时将每条消息按 topic 分别存入 `_latestByTopic`，而非只保留最后一条。
+- 根因：多 topic 场景下，`recv_frame_latest` 的跨 topic drain 会丢弃非最后 topic 的消息，导致 stereo 帧无法正常接收。
+
+#### 8.6.2 QuestCameraInfoMsg 字段补充
+
+- Python/C# 两侧新增字段：
+  - `is_supported`（bool）：PassthroughCameraAccess.IsSupported。
+  - `left_requested_width/height`、`right_requested_width/height`（int）：RequestedResolution。
+- C# QuestCameraInfoEncoder 的 BuildMessage 和 ComputeDigest 同步更新。
+
+#### 8.6.3 新增编解码器
+
+- Python CameraInfoEncoder：src/zmq_utils/payload/encoder/camera_info_encoder.py
+- C# CameraInfoDecoder：Assets/Scripts/Net/Payload/Decoder/CameraInfoDecoder.cs
+  - 继承 BaseDecoder，触发 OnCameraInfoReceived 事件。
+
+#### 8.6.4 quest_receiver.py → quest_io.py 重命名
+
+- 文件重命名为 quest_io.py，类名 QuestReceiver 保持不变。
+- poll_all 方法改用 `recv_all_latest_by_topic` 替代 `recv_frame_latest`，修复双 topic 消息丢失问题。
+- modules/__init__.py 导出路径同步更新。
+
 ## 9. 后续 AI 接手建议
 
 建议按以下顺序开始：
@@ -327,17 +438,17 @@
 4. 任何协议或显示字段变更，都同步更新本文件第 5 节。
 5. 若改动网络协议，必须 Python 与 Unity 同步改，避免单边兼容逻辑回流。
 6. 若需要重建 pixi 环境，先确认无 Python LSP/formatter 进程占用 `.pixi/envs/default`。
-7. ONNX 导出回归建议固定检查两项：
-
-- `feature_runner.onnx` 是否生成
-- `post_runner.onnx` 是否生成
-
-8. TRT 构建回归建议固定检查四项：
-
-- engine 文件是否带完整 tag（含 size/iters/max_disp）
-- 文件名是否包含平台标识（win/linux）
-- 文件名是否包含精度标识（fp16/fp32）
-- 运行时是否仅依赖新命名（无 legacy fallback）
+7. Quest 链路测试前，确认 Unity 场景中 PayloadSender 的 SenderEntry 列表已配置 quest_stereo 和 quest_camera_info 两个 topic。
+8. camera_source=local 时确认 --calib_dir 或 --camera_cache_dir 指向有效目录。
+9. 新增 topic 时，Python 侧 PayloadReceiver 的 topics 参数、QuestReceiver 的 topics 列表、以及 Unity 侧 SenderEntry/ReceiverEntry 需同步更新。
+10. ONNX 导出回归建议固定检查两项：
+    - `feature_runner.onnx` 是否生成
+    - `post_runner.onnx` 是否生成
+11. TRT 构建回归建议固定检查四项：
+    - engine 文件是否带完整 tag（含 size/iters/max_disp）
+    - 文件名是否包含平台标识（win/linux）
+    - 文件名是否包含精度标识（fp16/fp32）
+    - 运行时是否仅依赖新命名（无 legacy fallback）
 
 ## 10. 文档维护规则
 

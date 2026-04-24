@@ -3,7 +3,7 @@
 from .realsense import RGBDFrame, RealSenseCamera, StereoCalibration, StereoFrame
 from .yoloe26 import Yoloe26Masker, Yoloe26Result
 from .fast_foundationstereo import FastFoundationStereoRealtime
-from .quest_stereo import QuestStereoCalibration, QuestStereoCamera, QuestStereoMsg
+from .quest_io import QuestReceiver, QuestStereoCalibration, QuestStereoMsg
 from .foundationpose import FoundationPoseEstimator
 
 __all__ = [
@@ -15,7 +15,7 @@ __all__ = [
     "Yoloe26Result",
     "FastFoundationStereoRealtime",
     "QuestStereoCalibration",
-    "QuestStereoCamera",
+    "QuestReceiver",
     "QuestStereoMsg",
     "FoundationPoseEstimator",
 ]

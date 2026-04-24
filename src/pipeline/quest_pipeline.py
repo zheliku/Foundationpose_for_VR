@@ -21,12 +21,13 @@ if __package__ is None or __package__ == "":
 from modules import (  # noqa: E402
     FastFoundationStereoRealtime,
     FoundationPoseEstimator,
-    QuestStereoCamera,
+    QuestReceiver,
     QuestStereoCalibration,
     QuestStereoMsg,
     Yoloe26Masker,
 )
 from modules.cutie import CutieTracker  # noqa: E402
+from zmq_utils.payload.message.quest_camera_info_msg import QuestCameraInfoMsg  # noqa: E402
 
 THIS_FILE = Path(__file__).resolve()
 SRC_DIR = THIS_FILE.parent.parent
@@ -183,78 +184,73 @@ class QuestStereoPosePipeline:
     Quest 位姿 Pipeline（结构化独立实现）。
 
     说明：
-    1. `start()`：仅启动网络接收并重置运行状态。
+    1. `start()`：启动网络接收并重置运行状态。
     2. `run()`：处理一帧并返回 `PosePipelineOutput`。
     3. `stop()`：释放接收器资源。
 
-    API 输入：
-    - Quest 网络双目图（内部读取）。
-    - 标定参数、模型参数（构建时注入）。
-
-    API 输出：
-    - `PosePipelineOutput`，核心是 `pose_4x4`（可直接用于网络回传）。
+    标定初始化策略：
+    - camera_source=network: 等待网络 camera_info 消息后懒初始化 K 和 PoseEstimator。
+    - camera_source=local: 从本地缓存或标定文件加载，立即初始化。
     """
 
     # 依赖注入。
-    args: argparse.Namespace  # 命令行/配置参数集合。
-    camera: QuestStereoCamera  # Quest 双目输入源。
-    yolo: Yoloe26Masker  # 2D 分割模块。
-    ffs: FastFoundationStereoRealtime  # 双目深度模块。
-    cutie_tracker: CutieTracker | None  # 可选 2D 跟踪模块。
+    args: argparse.Namespace
+    camera: QuestReceiver
+    yolo: Yoloe26Masker
+    ffs: FastFoundationStereoRealtime
+    cutie_tracker: CutieTracker | None
 
     # 运行期对象与标定状态。
-    pose_estimator: FoundationPoseEstimator | None = None  # FoundationPose 估计器。
-    calib: QuestStereoCalibration | None = None  # Quest 标定参数。
-    cam_k: np.ndarray | None = None  # 映射到运行分辨率后的相机内参 K。
-    fx: float = 0.0  # 当前帧使用的焦距 fx。
-    frame_w: int = 0  # 运行分辨率宽度。
-    frame_h: int = 0  # 运行分辨率高度。
+    pose_estimator: FoundationPoseEstimator | None = None
+    calib: QuestStereoCalibration | None = None
+    cam_k: np.ndarray | None = None
+    fx: float = 0.0
+    frame_w: int = 0
+    frame_h: int = 0
+
     # 可配置运行参数。
-    symmetry_tfs: np.ndarray | None = None  # 对称变换集合。
-    min_depth: float = 0.1  # 最小有效深度（米）。
-    max_depth: float = 3.0  # 最大有效深度（米）。
-    stats_interval: int = 30  # 统计日志输出间隔（帧）。
+    symmetry_tfs: np.ndarray | None = None
+    min_depth: float = 0.1
+    max_depth: float = 3.0
+    stats_interval: int = 30
 
     # 流程状态标志。
-    stage: int = 4  # 当前处理阶段（1..4）。
-    _started: bool = False  # Pipeline 是否已启动。
-    _has_pose: bool = False  # 是否已完成首次注册并进入跟踪。
-    _cutie_initialized: bool = False  # Cutie 是否已初始化。
+    stage: int = 4
+    _started: bool = False
+    _has_pose: bool = False
+    _cutie_initialized: bool = False
+    _calib_initialized: bool = False  # 标定是否已初始化。
 
     # 性能统计累加器。
-    _frame_count: int = 0  # 已处理帧数。
-    _start_t: float = 0.0  # 整体统计起始时间。
-    _stats_t: float = 0.0  # 上次统计打印时间。
-    _last_frame_t: float = 0.0  # 上一帧完成时间（用于实时 FPS）。
-    _fps_rt: float = 0.0  # 平滑后的实时 FPS。
-    _yolo_acc: float = 0.0  # 累计 YOLO 耗时（毫秒）。
-    _depth_acc: float = 0.0  # 累计深度估计耗时（毫秒）。
-    _cutie_acc: float = 0.0  # 累计 Cutie 耗时（毫秒）。
-    _pose_acc: float = 0.0  # 累计位姿估计耗时（毫秒）。
+    _frame_count: int = 0
+    _start_t: float = 0.0
+    _stats_t: float = 0.0
+    _last_frame_t: float = 0.0
+    _fps_rt: float = 0.0
+    _yolo_acc: float = 0.0
+    _depth_acc: float = 0.0
+    _cutie_acc: float = 0.0
+    _pose_acc: float = 0.0
 
     def __init__(
         self,
         args: argparse.Namespace,
-        camera: QuestStereoCamera,
+        camera: QuestReceiver,
         yolo: Yoloe26Masker,
         ffs: FastFoundationStereoRealtime,
         cutie_tracker: CutieTracker | None,
+        calib: QuestStereoCalibration | None = None,
     ) -> None:
         """
         初始化 Quest 位姿 Pipeline。
 
         参数：
         - args: 命令行与运行配置。
-        - camera: Quest 双目输入模块。
+        - camera: Quest 多 Topic 接收模块。
         - yolo: 2D 分割模块。
         - ffs: 双目深度模块。
         - cutie_tracker: 可选 2D 跟踪模块。
-
-        初始化流程：
-        1. 绑定外部依赖对象。
-        2. 读取对称性与深度阈值配置。
-        3. 读取标定并计算运行内参 K。
-        4. 创建 FoundationPose 估计器。
+        - calib: 可选预加载的标定（camera_source=local 时传入）。
         """
         self.args = args
         self.camera = camera
@@ -262,7 +258,7 @@ class QuestStereoPosePipeline:
         self.ffs = ffs
         self.cutie_tracker = cutie_tracker
 
-        # 对称约束预先缓存，避免循环内重复计算。
+        # 对称约束预先缓存。
         self.symmetry_tfs = (
             _generate_cube_symmetry_tfs() if args.symmetry_mode == "cube" else None
         )
@@ -272,27 +268,31 @@ class QuestStereoPosePipeline:
         self.max_depth = float(args.max_depth)
         self.stats_interval = max(int(args.stats_interval), 1)
 
-        # 标定文件在构建阶段读入一次，后续不再变化。
-        self.calib = self.camera.get_stereo_calibration(Path(self.args.calib_dir))
+        # 若提供了标定，立即初始化 K 和 PoseEstimator。
+        if calib is not None:
+            self._init_from_calibration(calib)
+
+    def _init_from_calibration(self, calib: QuestStereoCalibration) -> None:
+        """根据标定参数初始化 K 和 PoseEstimator。"""
+        self.calib = calib
         logging.info(
             "[QuestCalib] fx=%.3f fy=%.3f cx=%.3f cy=%.3f baseline=%.6fm calib=%dx%d",
-            self.calib.left_fx,
-            self.calib.left_fy,
-            self.calib.left_cx,
-            self.calib.left_cy,
-            self.calib.baseline_m,
-            self.calib.calib_width,
-            self.calib.calib_height,
+            calib.left_fx,
+            calib.left_fy,
+            calib.left_cx,
+            calib.left_cy,
+            calib.baseline_m,
+            calib.calib_width,
+            calib.calib_height,
         )
 
-        # 相机参数固定，因此在 __init__ 一次性完成 K 与 PoseEstimator 初始化。
         self.frame_w = max(int(self.args.process_width), 0)
         self.frame_h = max(int(self.args.process_height), 0)
         if self.frame_w <= 0 or self.frame_h <= 0:
-            self.frame_w = int(self.calib.calib_width)
-            self.frame_h = int(self.calib.calib_height)
+            self.frame_w = int(calib.calib_width)
+            self.frame_h = int(calib.calib_height)
 
-        self.cam_k = self.calib.scaled_k(
+        self.cam_k = calib.scaled_k(
             width=self.frame_w,
             height=self.frame_h,
             assume_center_crop=bool(self.args.calib_assume_center_crop),
@@ -323,67 +323,23 @@ class QuestStereoPosePipeline:
             debug=0,
             debug_dir=None,
         )
+        self._calib_initialized = True
 
-    @staticmethod
-    def _preprocess_stereo_pair(
-        left_raw: np.ndarray,
-        right_raw: np.ndarray,
-        target_width: int,
-        target_height: int,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """把双目图统一到同分辨率与 BGR 格式。"""
-        # 直接在方法内完成灰度转 BGR，避免额外包装函数。
-        left_bgr = (
-            cv2.cvtColor(left_raw, cv2.COLOR_GRAY2BGR)
-            if left_raw.ndim == 2
-            else left_raw[..., :3]
-        )
-        right_bgr = (
-            cv2.cvtColor(right_raw, cv2.COLOR_GRAY2BGR)
-            if right_raw.ndim == 2
-            else right_raw[..., :3]
-        )
-
-        # 若左右尺寸不一致，先取共同最小尺寸对齐。
-        if left_bgr.shape[:2] != right_bgr.shape[:2]:
-            out_h = min(left_bgr.shape[0], right_bgr.shape[0])
-            out_w = min(left_bgr.shape[1], right_bgr.shape[1])
-            left_bgr = cv2.resize(
-                left_bgr, (out_w, out_h), interpolation=cv2.INTER_LINEAR
-            )
-            right_bgr = cv2.resize(
-                right_bgr, (out_w, out_h), interpolation=cv2.INTER_LINEAR
-            )
-
-        # 再根据目标处理分辨率进行缩放。
-        if target_width > 0 and target_height > 0:
-            h, w = left_bgr.shape[:2]
-            if w != target_width or h != target_height:
-                interpolation = (
-                    cv2.INTER_AREA
-                    if (target_width < w or target_height < h)
-                    else cv2.INTER_LINEAR
-                )
-                left_bgr = cv2.resize(
-                    left_bgr, (target_width, target_height), interpolation=interpolation
-                )
-                right_bgr = cv2.resize(
-                    right_bgr,
-                    (target_width, target_height),
-                    interpolation=interpolation,
-                )
-
-        return left_bgr, right_bgr
+    def _try_init_from_network(self) -> bool:
+        """尝试从网络 camera_info 消息初始化标定。返回是否成功。"""
+        calib = self.camera.get_calibration()
+        if calib is None:
+            return False
+        self._init_from_calibration(calib)
+        return True
 
     def start(self) -> None:
-        """启动 Pipeline：仅启动接收器并重置运行状态。"""
+        """启动 Pipeline：启动接收器并重置运行状态。"""
         if self._started:
             return
 
-        # 启动网络接收器。
         self.camera.start()
 
-        # 重置运行统计。
         self._started = True
         self._has_pose = False
         self._cutie_initialized = False
@@ -464,33 +420,86 @@ class QuestStereoPosePipeline:
         self._cutie_acc = 0.0
         self._pose_acc = 0.0
 
+    def _preprocess_stereo_pair(
+        self,
+        left: np.ndarray,
+        right: np.ndarray,
+        target_width: int,
+        target_height: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Convert actual Quest stereo frames to the algorithm resolution.
+
+        Intrinsics are mapped from calibration space to the target frame by
+        QuestStereoCalibration.scaled_k(). This function only normalizes decoded
+        network images, so already-640x480 frames are not expanded back to the
+        active array and cropped a second time.
+        """
+        if self.calib is None:
+            raise RuntimeError("标定尚未初始化，无法预处理图像。")
+
+        def _to_bgr(img: np.ndarray) -> np.ndarray:
+            if img.ndim == 2:
+                return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+            return img[..., :3]
+
+        left_bgr = _to_bgr(left)
+        right_bgr = _to_bgr(right)
+
+        if left_bgr.shape[:2] != right_bgr.shape[:2]:
+            out_h = min(left_bgr.shape[0], right_bgr.shape[0])
+            out_w = min(left_bgr.shape[1], right_bgr.shape[1])
+            left_bgr = cv2.resize(
+                left_bgr, (out_w, out_h), interpolation=cv2.INTER_LINEAR
+            )
+            right_bgr = cv2.resize(
+                right_bgr, (out_w, out_h), interpolation=cv2.INTER_LINEAR
+            )
+
+        target_w = int(target_width)
+        target_h = int(target_height)
+        if target_w > 0 and target_h > 0:
+            h, w = left_bgr.shape[:2]
+            if w != target_w or h != target_h:
+                interpolation = (
+                    cv2.INTER_AREA
+                    if (target_w < w or target_h < h)
+                    else cv2.INTER_LINEAR
+                )
+                left_bgr = cv2.resize(
+                    left_bgr, (target_w, target_h), interpolation=interpolation
+                )
+                right_bgr = cv2.resize(
+                    right_bgr, (target_w, target_h), interpolation=interpolation
+                )
+
+        return left_bgr, right_bgr
+
+
     def run(self, return_debug: bool = False) -> PosePipelineOutput | None:
         """
         执行一帧 Pipeline，并返回位姿结果。
 
-        输入：
-        - 内部输入源：Quest 网络双目帧（自动接收）。
-        - 内部参数：阶段开关、模型配置、标定参数。
-
-        输出：
-        - `PosePipelineOutput`：其中 `pose_4x4` 为核心输出。
-        - 若当前未收到帧，则返回 None（调用方可继续下一轮轮询）。
+        若标定未初始化，优先尝试从网络获取 camera_info。
+        若当前未收到帧，则返回 None。
         """
         if not self._started:
             raise RuntimeError("Pipeline 尚未启动，请先调用 start()。")
 
+        # 懒初始化标定：等待网络 camera_info。
+        if not self._calib_initialized:
+            self.camera.poll_all(timeout_ms=100)
+            if not self._try_init_from_network():
+                return None
+
         # 读取一帧网络双目图。
         stereo = self.camera.get_stereo_frames()
 
-        # Quest 接收可能超时，此时返回 None，让上层继续轮询。
         if stereo is None:
             return None
 
-        # StereoDecoder 理论上会填充左右图和接收时间，这里做保护以满足静态类型检查。
         if stereo.left is None or stereo.right is None or stereo.timestamp_ms is None:
             return None
 
-        # K 在 __init__ 已固定，这里直接按目标分辨率处理双目图。
         left_bgr, right_bgr = self._preprocess_stereo_pair(
             stereo.left,
             stereo.right,
@@ -505,7 +514,7 @@ class QuestStereoPosePipeline:
         if self.calib is None:
             raise RuntimeError("标定信息尚未初始化。")
 
-        # 默认占位数据，确保每个阶段都可以安全返回输出结构。
+        # 默认占位数据。
         timing = PipelineStepTiming()
         det_count = 0
         phase = "STAGE1_CAMERA"
@@ -551,7 +560,6 @@ class QuestStereoPosePipeline:
             cutie_bbox = [-1, -1, 0, 0]
             cutie_mask: np.ndarray | None = None
 
-            # 首次成功检测后注册位姿。
             if not self._has_pose:
                 has_valid_mask = det_count > 0 and np.count_nonzero(mask_bw) > 0
                 if has_valid_mask:
@@ -564,7 +572,6 @@ class QuestStereoPosePipeline:
                     self._has_pose = True
                     vis_bgr = self.pose_estimator.visualize_pose(left_bgr, pose_4x4)
 
-                    # 可选：用同帧 mask 初始化 Cutie。
                     if self.cutie_tracker is not None:
                         ct0 = time.perf_counter()
                         try:
@@ -572,7 +579,7 @@ class QuestStereoPosePipeline:
                                 left_bgr, init_mask=mask_bw
                             )
                             self._cutie_initialized = True
-                        except Exception as exc:  # pragma: no cover
+                        except Exception as exc:
                             self._cutie_initialized = False
                             logging.warning("[cutie] 初始化失败: %s", exc)
                         timing.cutie_ms += (time.perf_counter() - ct0) * 1000.0
@@ -580,7 +587,6 @@ class QuestStereoPosePipeline:
                 else:
                     phase = "WAIT_DETECT"
 
-            # 已注册后进入跟踪。
             else:
                 if self.cutie_tracker is not None and self._cutie_initialized:
                     ct0 = time.perf_counter()
@@ -599,7 +605,7 @@ class QuestStereoPosePipeline:
                                 left_bgr, init_mask=mask_bw
                             )
                             self._cutie_initialized = True
-                    except Exception as exc:  # pragma: no cover
+                    except Exception as exc:
                         logging.warning("[cutie] 跟踪失败: %s", exc)
                         self._cutie_initialized = False
                     timing.cutie_ms += (time.perf_counter() - ct0) * 1000.0
@@ -644,13 +650,11 @@ class QuestStereoPosePipeline:
         self._last_frame_t = now
         depth_valid_ratio = float((depth_m > 0).mean()) if self.stage >= 3 else 0.0
 
-        # 如需调试图像，则在 API 返回结构中附带，不在 run 内显示。
         debug_data: PipelineDebugData | None = None
         if return_debug:
             depth_vis_bgr = _colorize_depth(depth_m, self.min_depth, self.max_depth)
             stereo_vis_bgr = np.hstack((left_bgr, right_bgr))
 
-            # 首行固定展示 fps，其他信息按短行显示，避免窗口文本溢出。
             _draw_hud(
                 vis_bgr,
                 [
@@ -700,39 +704,57 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--listen_host",
         type=str,
         default="*",
-        help="Quest 双目接收端监听地址。'*' 表示监听所有网卡地址。",
+        help="Quest 接收端监听地址。",
     )
     parser.add_argument(
         "--listen_port",
         type=int,
         default=5557,
-        help="Quest 双目接收端口（需与 Unity 发送端端口一致）。",
+        help="Quest 接收端口（需与 Unity 发送端端口一致）。",
     )
     parser.add_argument(
         "--recv_hwm",
         type=int,
-        default=1,
-        help="接收端高水位（High Water Mark），值小可降低延迟但更容易丢旧帧。",
+        default=20,
+        help=(
+            "接收端高水位。注意：Quest stereo ≈ 45KB@37fps，若 hwm 过小，"
+            "pose_server 启动期（TRT/FoundationPose/Warp 初始化，耗时数秒）"
+            "SUB 队列会被大帧持续覆盖，stereo 整条流可能断掉。"
+            "必须与 quest_io.py 的 QuestReceiver 默认值（20）保持一致。"
+        ),
     )
     parser.add_argument(
         "--recv_timeout_ms",
         type=int,
         default=100,
-        help="接收超时时间（毫秒）。超时后当前轮询返回空帧并继续下一轮。",
+        help="接收超时（毫秒）。",
     )
 
-    # 标定与处理分辨率参数。
+    # 标定来源参数。
+    parser.add_argument(
+        "--camera_source",
+        type=str,
+        default="network",
+        choices=["network", "local"],
+        help="标定来源：network=等待网络传输，local=优先本地缓存。",
+    )
     parser.add_argument(
         "--calib_dir",
         type=Path,
         default=PROJECT_DIR / "Calibration" / "20260322_070544",
-        help="Quest 双目标定目录，需包含 left_camera_characteristics.json 与 right_camera_characteristics.json。",
+        help="本地标定目录（仅 camera_source=local 时使用）。",
+    )
+    parser.add_argument(
+        "--camera_cache_dir",
+        type=Path,
+        default=PROJECT_DIR / "Calibration" / "cache",
+        help="本地 camera_info 缓存目录。",
     )
     parser.add_argument(
         "--calib_assume_center_crop",
         type=int,
         default=1,
-        help="是否按“中心裁剪+缩放”映射标定内参到运行分辨率（1=是，0=仅线性缩放）。",
+        help="Map intrinsics with center-crop+scale by default (1); use 0 for linear scale only.",
     )
     parser.add_argument(
         "--process_width",
@@ -758,19 +780,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--mobileclip2_path",
         type=Path,
         default=PROJECT_DIR / "mobileclip2_b.ts",
-        help="YOLOE 文本编码器（mobileclip2）权重路径。",
+        help="YOLOE 文本编码器权重路径。",
     )
     parser.add_argument(
         "--yolo_prompt",
         type=str,
         default="white cube",
-        help="YOLOE 文本提示词，用于指定目标类别（例如 white cube）。",
+        help="YOLOE 文本提示词。",
     )
     parser.add_argument(
         "--yolo_conf",
         type=float,
         default=0.15,
-        help="YOLO 检测置信度阈值，越大越严格。",
+        help="YOLO 检测置信度阈值。",
     )
     parser.add_argument(
         "--yolo_imgsz",
@@ -788,7 +810,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--yolo_mask_threshold",
         type=float,
         default=0.5,
-        help="YOLO 分割 mask 的二值化阈值。",
+        help="YOLO 分割 mask 二值化阈值。",
     )
 
     # FFS 参数。
@@ -806,19 +828,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--ffs_device",
         type=str,
         default="cuda",
-        help="FFS 推理设备（cuda 或 cpu）。",
+        help="FFS 推理设备。",
     )
     parser.add_argument(
         "--ffs_scale",
         type=float,
         default=1.0,
-        help="FFS 推理缩放系数，<1 可提速但会牺牲精度。",
+        help="FFS 推理缩放系数。",
     )
     parser.add_argument(
         "--ffs_valid_iters",
         type=int,
         default=4,
-        help="FFS 网络迭代次数，越大通常越稳但更慢。",
+        help="FFS 网络迭代次数。",
     )
     parser.add_argument(
         "--ffs_max_disp",
@@ -831,27 +853,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default="triton",
         choices=["triton", "pytorch1"],
-        help="FFS 体构建优化后端：triton 或 pytorch1。",
+        help="FFS 体构建优化后端。",
     )
     parser.add_argument(
         "--ffs_seed",
         type=int,
         default=-1,
-        help="FFS 随机种子；<0 为速度优先模式，>=0 为确定性模式。",
+        help="FFS 随机种子。",
     )
     parser.add_argument(
         "--ffs_cudnn_benchmark",
         type=int,
         default=1,
         choices=[0, 1],
-        help="FFS 是否开启 cudnn.benchmark（1=开启，0=关闭）。",
+        help="FFS 是否开启 cudnn.benchmark。",
     )
     parser.add_argument(
         "--ffs_use_trt",
         type=int,
         default=1,
         choices=[0, 1],
-        help="是否优先使用 TensorRT 路径（1=启用，0=关闭）。",
+        help="是否优先使用 TensorRT。",
     )
     parser.add_argument(
         "--ffs_trt_precision",
@@ -865,43 +887,43 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         choices=[0, 1],
-        help="TRT 依赖/资源缺失时是否直接报错（1=严格模式）。",
+        help="TRT 缺失时是否直接报错。",
     )
     parser.add_argument(
         "--ffs_trt_tag",
         type=str,
         default="",
-        help="TRT artifact tag；为空时按输入尺寸与参数自动拼接。",
+        help="TRT artifact tag；为空时自动拼接。",
     )
     parser.add_argument(
         "--ffs_trt_platform_tag",
         type=str,
         default="",
-        help="TRT 平台标签（如 win/linux）；为空时自动识别。",
+        help="TRT 平台标签；为空时自动识别。",
     )
     parser.add_argument(
         "--ffs_trt_feature_engine_path",
         type=str,
         default="",
-        help="TRT feature engine 绝对路径；为空时按 tag 自动匹配。",
+        help="TRT feature engine 路径；为空时按 tag 匹匹配。",
     )
     parser.add_argument(
         "--ffs_trt_post_engine_path",
         type=str,
         default="",
-        help="TRT post engine 绝对路径；为空时按 tag 自动匹配。",
+        help="TRT post engine 路径；为空时按 tag 自动匹配。",
     )
     parser.add_argument(
         "--min_depth",
         type=float,
         default=0.1,
-        help="有效深度下限（米），低于此值会被置零。",
+        help="有效深度下限（米）。",
     )
     parser.add_argument(
         "--max_depth",
         type=float,
         default=3.0,
-        help="有效深度上限（米），高于此值会被置零。",
+        help="有效深度上限（米）。",
     )
 
     # FoundationPose 参数。
@@ -909,26 +931,26 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--mesh_path",
         type=Path,
         default=PROJECT_DIR / "data" / "online" / "cube" / "mesh" / "cube.stl",
-        help="FoundationPose 使用的目标物体网格模型路径。",
+        help="目标物体网格模型路径。",
     )
     parser.add_argument(
         "--est_refine_iter",
         type=int,
         default=5,
-        help="FoundationPose 首次注册阶段迭代次数。",
+        help="FoundationPose 注册阶段迭代次数。",
     )
     parser.add_argument(
         "--track_refine_iter",
         type=int,
         default=2,
-        help="FoundationPose 连续跟踪阶段迭代次数。",
+        help="FoundationPose 跟踪阶段迭代次数。",
     )
     parser.add_argument(
         "--symmetry_mode",
         type=str,
         default="cube",
         choices=["none", "cube"],
-        help="对称约束模式：none 关闭，cube 使用立方体 24 对称群。",
+        help="对称约束模式。",
     )
 
     # 统计与 2D tracker 参数。
@@ -936,19 +958,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--stats_interval",
         type=int,
         default=30,
-        help="统计日志输出间隔（按帧数计）。",
+        help="统计日志输出间隔（帧数）。",
     )
     parser.add_argument(
         "--activate_2d_tracker",
         type=int,
         default=1,
-        help="是否启用 Cutie 2D 跟踪（1=启用，0=关闭）。",
+        help="是否启用 Cutie 2D 跟踪。",
     )
     parser.add_argument(
         "--cutie_erosion_size",
         type=int,
         default=5,
-        help="Cutie mask 腐蚀核大小（像素），用于稳定 bbox 边界。",
+        help="Cutie mask 腐蚀核大小（像素）。",
     )
     return parser
 
@@ -958,21 +980,61 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return build_arg_parser().parse_args(argv)
 
 
+def _load_local_calib(args: argparse.Namespace) -> QuestStereoCalibration | None:
+    """尝试从本地缓存目录加载标定 JSON，再回退到标定目录。"""
+    import json as _json
+    import msgpack as _msgpack
+    from zmq_utils.payload.message.quest_camera_info_msg import QuestCameraInfoMsg
+
+    # 优先从缓存目录读取 camera_info_latest.json。
+    cache_dir = Path(args.camera_cache_dir)
+    latest_path = cache_dir / "camera_info_latest.json"
+    if latest_path.is_file():
+        try:
+            with latest_path.open("r", encoding="utf-8") as f:
+                data = _json.load(f)
+            # 将 JSON dict 重新序列化为 msgpack 再反序列化，确保字段完整。
+            payload = _msgpack.packb(data, use_bin_type=True)
+            msg = QuestCameraInfoMsg.deserialize(payload)
+            if msg is not None:
+                return QuestStereoCalibration.from_camera_info_msg(msg)
+        except Exception as exc:
+            logging.warning("[pipeline] 读取 camera_info_latest.json 失败: %s", exc)
+
+    # 回退到标定目录。
+    calib_dir = Path(args.calib_dir)
+    if calib_dir.is_dir():
+        left_path = calib_dir / "left_camera_characteristics.json"
+        right_path = calib_dir / "right_camera_characteristics.json"
+        if left_path.is_file() and right_path.is_file():
+            return QuestStereoCalibration.from_local_json(calib_dir)
+
+    return None
+
+
 def build_quest_pipeline(args: argparse.Namespace) -> QuestStereoPosePipeline:
     """构建 Quest Pipeline 对象（API 工厂函数）。"""
-    required_paths = [
+    # 校验模型文件（仅校验始终需要的）。
+    model_paths = [
         args.yolo_model_path,
         args.mobileclip2_path,
         args.ffs_model_path,
         args.mesh_path,
-        args.calib_dir / "left_camera_characteristics.json",
-        args.calib_dir / "right_camera_characteristics.json",
     ]
-    for path in required_paths:
+    for path in model_paths:
         if not Path(path).exists():
             raise FileNotFoundError(f"必要文件不存在: {path}")
 
-    camera = QuestStereoCamera(
+    # camera_source=local 时需要校验标定文件。
+    calib: QuestStereoCalibration | None = None
+    if args.camera_source == "local":
+        calib = _load_local_calib(args)
+        if calib is None:
+            logging.warning(
+                "[pipeline] camera_source=local 但未找到本地标定，将等待网络 camera_info"
+            )
+
+    camera = QuestReceiver(
         listen_host=str(args.listen_host),
         listen_port=int(args.listen_port),
         hwm=int(args.recv_hwm),
@@ -1022,6 +1084,7 @@ def build_quest_pipeline(args: argparse.Namespace) -> QuestStereoPosePipeline:
         yolo=yolo,
         ffs=ffs,
         cutie_tracker=cutie_tracker,
+        calib=calib,
     )
 
 
@@ -1039,19 +1102,16 @@ def run_quest_pipeline(args: argparse.Namespace) -> None:
         logging.info("按 1/2/3/4 切阶段，按 r 重置，按 q/ESC 退出")
 
         while True:
-            # 这里通过 API 获取当前帧位姿结果。
             output = pipeline.run(return_debug=True)
             if output is None:
                 continue
 
-            # main 负责展示，不把显示逻辑放进 API run()。
             if output.debug is not None:
                 cv2.imshow("Quest Pipeline", output.debug.vis_bgr)
                 cv2.imshow("Quest Mask", output.debug.mask_bw)
                 cv2.imshow("Quest Depth", output.debug.depth_vis_bgr)
                 cv2.imshow("Quest Stereo", output.debug.stereo_vis_bgr)
 
-            # 若拿到位姿，可在这里进行传输（示例仅日志显示）。
             if output.pose_4x4 is not None:
                 t = output.pose_4x4[:3, 3]
                 logging.debug(
@@ -1080,7 +1140,7 @@ def run_quest_pipeline(args: argparse.Namespace) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
-    """脚本入口：构建并运行 main 示例。"""
+    """脚本入口。"""
     args = parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     run_quest_pipeline(args)
