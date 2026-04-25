@@ -8,7 +8,7 @@ ZMQ 工具包
 - payload: 通用 payload 编解码
 
 使用示例：
-    from zmq_utils import PayloadSender, PayloadReceiver, RGBDEncoder
+    from zmq_utils import PayloadSender, PayloadReceiver, PoseEncoder
 """
 
 # 通用 payload 收发
@@ -25,9 +25,6 @@ from .payload import (
     PoseMsg,
     QuestCameraInfoMsg,
     QuestStereoMsg,
-    RGBDDecoder,
-    RGBDEncoder,
-    RGBDMsg,
     StereoDecoder,
 )
 
@@ -46,8 +43,5 @@ __all__ = [
     "PoseMsg",
     "QuestCameraInfoMsg",
     "QuestStereoMsg",
-    "RGBDDecoder",
-    "RGBDEncoder",
-    "RGBDMsg",
     "StereoDecoder",
 ]

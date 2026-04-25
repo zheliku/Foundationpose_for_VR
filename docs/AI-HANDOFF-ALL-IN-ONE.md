@@ -142,7 +142,7 @@ Quest 与 RealSense Pipeline 统一使用 4 个阶段：
   - Quest 输入完整算法链路。
   - `camera_source=network` 默认会先尝试读取 `Calibration/cache/camera_info_latest.json` 预初始化 K/FoundationPose，随后收到网络 camera_info 时校验并按需刷新。
   - `--preload_camera_cache 0` 可关闭该快速启动策略，恢复为严格等待网络 camera_info。
-  - `camera_source=local` 时优先读 `Calibration/cache/camera_info_latest.json`，再回退旧本地标定目录；失败后仍等待网络。
+  - `camera_source=local` 时仅优先读 `Calibration/cache/camera_info_latest.json`；失败后仍等待网络 camera_info。
 
 - `src/pipeline/realsense_pipeline.py`
   - RealSense 输入完整算法链路。
@@ -160,11 +160,10 @@ Quest 与 RealSense Pipeline 统一使用 4 个阶段：
 
 - `src/zmq_utils/communicate/receiver.py`
   - `PayloadReceiver`，统一 SUB 模式。
-  - 多 topic 场景必须用 `recv_all_latest_by_topic()`。
-  - `recv_frame_latest()` 只适合单 topic，因为它不区分 topic drain。
+  - 所有接收场景统一使用 `recv_all_latest_by_topic()`，按 topic 分别保留最新 payload。
 
 - `src/zmq_utils/payload/message/*.py`
-  - MessagePack 消息定义：`PoseMsg`、`QuestStereoMsg`、`QuestCameraInfoMsg`、`RGBDMsg`。
+  - MessagePack 消息定义：`PoseMsg`、`QuestStereoMsg`、`QuestCameraInfoMsg`。
 
 - `src/zmq_utils/payload/encoder/*.py` / `decoder/*.py`
   - 业务对象和 MessagePack payload 之间的转换层。
@@ -190,7 +189,7 @@ Quest 与 RealSense Pipeline 统一使用 4 个阶段：
 
 - `Assets/Scripts/Net/Payload/Encoder/QuestCameraInfoEncoder.cs`
   - 读取左右相机内参、分辨率、镜头偏移、基线等静态信息。
-  - 带 digest 缓存，信息不变时复用已编码 payload。
+  - 每次编码都会刷新 `sender_mono_ms`，发送频率由 `PayloadSender` 的 `targetFps` 控制。
 
 - `Assets/Scripts/Net/Payload/Decoder/PoseDecoder.cs`
   - 解码 Python 回传的 `PoseMsg`。
@@ -283,9 +282,8 @@ Quest stereo 帧较大，且 `pose_server` 启动阶段会初始化 TRT/Foundati
 
 ### 6.2 Python 标定构造方式
 
-- 网络方式：`QuestStereoCalibration.from_camera_info_msg()`。
-- 本地旧标定方式：`QuestStereoCalibration.from_local_json()`。
-- Pipeline 统一通过 `QuestReceiver.get_calibration()` 获取网络标定。
+- 网络与缓存统一使用 `QuestStereoCalibration.from_camera_info_msg()`。
+- Pipeline 通过 `QuestReceiver.get_calibration()` 获取网络标定，通过 `camera_info_latest.json` 预加载缓存标定。
 
 ### 6.3 缓存策略
 
@@ -304,7 +302,7 @@ Pipeline 启动策略：
   - 此时只要收到 `quest_stereo` 就可以开始估计 pose，不必阻塞等待本次会话的 `quest_camera_info`。
   - 后续收到网络 `quest_camera_info` 后，会与当前标定签名比较；若不同且 `network_calib_update=1`，则刷新 K/PoseEstimator 并重置跟踪状态。
 - `camera_source=network` + `preload_camera_cache=0`：严格等待网络 `quest_camera_info` 后再初始化。
-- `camera_source=local`：优先读缓存 latest，再回退旧 `Calibration/20260322_070544` 目录；若失败，再等待网络。
+- `camera_source=local`：优先读缓存 latest；若失败，再等待网络 camera_info。
 
 ### 6.4 K 映射策略
 
@@ -522,6 +520,8 @@ Quest 额外包含：
 5. 多 topic drain bug 已在 Python 与 Unity 两侧通过“按 topic 缓存最新帧”修复。
 6. Quest Pipeline 当前默认 FFS 权重路径在代码中是 `23-36-37/model_best_bp2_serialize.pth`；RealSense Pipeline 默认是 `20-30-48/model_best_bp2_serialize.pth`。
 7. 项目代码中若干仍偏英文或过短的注释/文档字符串已补充为更详细中文说明。
+8. 新增 Quest 快速启动策略：`camera_source=network` 默认通过 `preload_camera_cache=1` 读取本地 `camera_info_latest.json` 预初始化 K/FoundationPose，收到 `quest_stereo` 后即可开始估计；网络 `quest_camera_info` 后续用于校验与刷新。
+9. 新增 `network_calib_update` 参数：默认收到不同网络标定后刷新 K/PoseEstimator 并重置跟踪；可设为 0 禁用自动刷新。
 
 ## 13. 后续 AI 接手建议
 
@@ -530,24 +530,25 @@ Quest 额外包含：
 1. 先确认 `Calibration/cache/camera_info_latest.json` 已有一次有效缓存；有缓存时 `pose_server.py` 默认会先初始化 FoundationPose，后续收到 stereo 即可估计。
 2. 再跑 `pose_server.py`，确认 Unity → Python 的 `quest_stereo` 能收到；`quest_camera_info` 仍应持续发送，用于校验/刷新缓存。
 3. 若想严格验证网络 camera_info，可加 `--preload_camera_cache 0` 强制等待本次会话的网络标定。
-4. 用 stage 1/2/3/4 逐段定位，不要直接在 stage 4 盲调。
-4. stage 2 优先看 mask 是否稳定、目标 prompt 是否正确。
-5. stage 3 优先看 depth_valid 和深度范围，不要先调 FoundationPose。
-6. stage 4 再看 register 是否成功、track 是否稳定。
-7. 若 Unity 中物体位置明显错位，优先检查：
+4. 若不希望运行中因网络标定变化重建 PoseEstimator，可加 `--network_calib_update 0`。
+5. 用 stage 1/2/3/4 逐段定位，不要直接在 stage 4 盲调。
+6. stage 2 优先看 mask 是否稳定、目标 prompt 是否正确。
+7. stage 3 优先看 depth_valid 和深度范围，不要先调 FoundationPose。
+8. stage 4 再看 register 是否成功、track 是否稳定。
+9. 若 Unity 中物体位置明显错位，优先检查：
    - `PoseDecoder.convertFromOpenCvCamera`
    - `PoseFollow.sourceTarget`
    - `frame_id` 缓存命中
    - Quest K 映射方式
-8. 若 stereo 收不到但 camera_info 能收到，优先检查：
-   - Unity `PayloadSender` 是否有 `quest_stereo` Entry
-   - `QuestStereoEncoder` 左右相机是否 `IsPlaying`
-   - `recv_hwm` 是否太小
-9. 若 camera_info 收不到，优先检查：
-   - Unity `quest_camera_info` topic 是否配置
-   - `QuestCameraInfoEncoder` 左右相机引用是否有效
-10. 若 TRT 不生效，先确认 engine 文件名是否带完整 tag、平台和精度标签。
-11. 若协议字段变更，必须同步修改：
+10. 若 stereo 收不到但 camera_info 能收到，优先检查：
+    - Unity `PayloadSender` 是否有 `quest_stereo` Entry
+    - `QuestStereoEncoder` 左右相机是否 `IsPlaying`
+    - `recv_hwm` 是否太小
+11. 若 camera_info 收不到，优先检查：
+    - Unity `quest_camera_info` topic 是否配置
+    - `QuestCameraInfoEncoder` 左右相机引用是否有效
+12. 若 TRT 不生效，先确认 engine 文件名是否带完整 tag、平台和精度标签。
+13. 若协议字段变更，必须同步修改：
     - Python message/encoder/decoder
     - Unity Msg/Encoder/Decoder
     - 本文档第 5、6、8 节

@@ -13,7 +13,6 @@ Topic 协议：
 
 from __future__ import annotations
 
-import json
 import logging
 import sys
 import time
@@ -44,7 +43,7 @@ TOPIC_CAMERA_INFO = "quest_camera_info"
 
 @dataclass
 class QuestStereoCalibration:
-    """Quest 双目标定信息（可从网络 camera_info 消息或本地 JSON 构造）。"""
+    """Quest 双目标定信息（由网络 camera_info 消息构造）。"""
 
     left_fx: float
     left_fy: float
@@ -69,42 +68,6 @@ class QuestStereoCalibration:
             left_cx=msg.left_cx,
             left_cy=msg.left_cy,
             baseline_m=msg.baseline_m,
-            calib_width=width,
-            calib_height=height,
-        )
-
-    @classmethod
-    def from_local_json(cls, calib_dir: str | Path) -> QuestStereoCalibration:
-        """从本地标定 JSON 文件构造（兼容旧工作流）。"""
-        calib_path = Path(calib_dir).expanduser().resolve()
-        left_path = calib_path / "left_camera_characteristics.json"
-        right_path = calib_path / "right_camera_characteristics.json"
-        if not left_path.is_file() or not right_path.is_file():
-            raise FileNotFoundError(f"标定文件缺失: {left_path} 或 {right_path}")
-
-        with left_path.open("r", encoding="utf-8") as f:
-            left = json.load(f)
-        with right_path.open("r", encoding="utf-8") as f:
-            right = json.load(f)
-
-        left_intr = left["intrinsics"]
-        left_t = np.array(left["pose"]["translation"], dtype=np.float64)
-        right_t = np.array(right["pose"]["translation"], dtype=np.float64)
-        baseline_m = float(np.linalg.norm(right_t - left_t))
-        if baseline_m <= 0.0:
-            raise RuntimeError("Quest baseline 无效。")
-
-        sensor = left.get("sensor", {})
-        active = sensor.get("activeArraySize", {})
-        width = int(active.get("right", 1280) - active.get("left", 0))
-        height = int(active.get("bottom", 1280) - active.get("top", 0))
-
-        return cls(
-            left_fx=float(left_intr["fx"]),
-            left_fy=float(left_intr["fy"]),
-            left_cx=float(left_intr["cx"]),
-            left_cy=float(left_intr["cy"]),
-            baseline_m=baseline_m,
             calib_width=width,
             calib_height=height,
         )
@@ -364,15 +327,15 @@ class QuestReceiver:
         sender_mono_ms = message.sender_mono_ms
         sender_frame_id = message.frame_id
         alpha = 0.15
+        previous_frame_id = self._last_sender_frame_id
+        previous_mono_ms = self._last_sender_mono_ms
 
         if sender_frame_id is not None:
             if (
-                self._last_sender_frame_id is not None
-                and sender_frame_id > self._last_sender_frame_id + 1
+                previous_frame_id is not None
+                and sender_frame_id > previous_frame_id + 1
             ):
-                self._sender_gap_count += (
-                    sender_frame_id - self._last_sender_frame_id - 1
-                )
+                self._sender_gap_count += sender_frame_id - previous_frame_id - 1
             self._last_sender_frame_id = sender_frame_id
 
         if sender_mono_ms is not None:
@@ -404,12 +367,12 @@ class QuestReceiver:
 
             # 估计发送端帧率。
             if (
-                self._last_sender_frame_id is not None
+                previous_frame_id is not None
                 and sender_frame_id is not None
-                and self._last_sender_mono_ms is not None
+                and previous_mono_ms is not None
             ):
-                frame_delta = sender_frame_id - self._last_sender_frame_id
-                mono_delta_ms = sender_mono_ms - self._last_sender_mono_ms
+                frame_delta = sender_frame_id - previous_frame_id
+                mono_delta_ms = sender_mono_ms - previous_mono_ms
                 if frame_delta > 0 and mono_delta_ms > 1e-6:
                     sender_fps_inst = frame_delta * 1000.0 / mono_delta_ms
                     self._sender_fps_ema = (

@@ -6,8 +6,7 @@
 3) 统一使用 SUB 模式，首帧是 topic。
 
 说明：
-- recv_all_latest_by_topic 按 topic 分别 drain，适合多 topic 实时流场景。
-- recv_frame_latest 不区分 topic drain，仅适合单 topic 场景。
+- recv_all_latest_by_topic 按 topic 分别 drain，适合实时流场景。
 """
 
 from __future__ import annotations
@@ -129,44 +128,6 @@ class PayloadReceiver:
                 latest[result[0]] = result[1]
 
             return latest
-        except zmq.ZMQError:
-            return None
-
-    def recv_frame_latest(
-        self, timeout_ms: int = 0
-    ) -> tuple[str, bytes] | None:
-        """读取并返回最新一条消息，格式为 (topic, payload)。
-
-        注意：此方法不区分 topic drain，多 topic 场景下会丢失非最后 topic 的消息。
-        多 topic 场景请使用 recv_all_latest_by_topic。
-
-        行为：
-        - timeout_ms=-1 时阻塞等待一条消息。
-        - 其余场景先 poll，再读取一条并非阻塞 drain 到队尾。
-        - 仅返回最后一条消息，旧消息被丢弃。
-        """
-        if self.socket is None:
-            return None
-
-        try:
-            if timeout_ms == -1:
-                result = self._recv_frame_once(nonblock=False)
-            else:
-                if not self.socket.poll(timeout=max(int(timeout_ms), 0)):
-                    return None
-                result = self._recv_frame_once(nonblock=True)
-
-            if result is None:
-                return None
-
-            # 主动 drain 队列，仅保留最新消息。
-            while True:
-                newer = self._recv_frame_once(nonblock=True)
-                if newer is None:
-                    break
-                result = newer
-
-            return result
         except zmq.ZMQError:
             return None
 

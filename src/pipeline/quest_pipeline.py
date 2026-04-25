@@ -192,7 +192,7 @@ class QuestStereoPosePipeline:
     - camera_source=network + preload_camera_cache=1：优先用本地 camera_info_latest.json
       预初始化 K 和 PoseEstimator，收到网络 camera_info 后再校验/刷新。
     - camera_source=network + preload_camera_cache=0：严格等待网络 camera_info 后懒初始化。
-    - camera_source=local：从本地缓存或标定文件加载，立即初始化；失败后仍等待网络。
+    - camera_source=local：从本地 camera_info 缓存加载，立即初始化；失败后仍等待网络。
     """
 
     # 依赖注入。
@@ -221,6 +221,7 @@ class QuestStereoPosePipeline:
     _started: bool = False
     _has_pose: bool = False
     _cutie_initialized: bool = False
+    _last_processed_frame_id: int | None = None
     _calib_initialized: bool = False  # 标定是否已初始化。
 
     # 性能统计累加器。
@@ -252,7 +253,7 @@ class QuestStereoPosePipeline:
         - yolo: 2D 分割模块。
         - ffs: 双目深度模块。
         - cutie_tracker: 可选 2D 跟踪模块。
-        - calib: 可选预加载的标定（camera_source=local 时传入）。
+        - calib: 可选预加载的 camera_info 标定缓存。
         """
         self.args = args
         self.camera = camera
@@ -392,6 +393,7 @@ class QuestStereoPosePipeline:
         self._stats_t = self._start_t
         self._last_frame_t = 0.0
         self._fps_rt = 0.0
+        self._last_processed_frame_id = None
         self._yolo_acc = 0.0
         self._depth_acc = 0.0
         self._cutie_acc = 0.0
@@ -543,6 +545,13 @@ class QuestStereoPosePipeline:
 
         if stereo.left is None or stereo.right is None or stereo.timestamp_ms is None:
             return None
+
+        # 接收器会缓存最新帧；这里跳过重复 frame_id，避免无新包时重复跑整条算法链。
+        if stereo.frame_id is not None:
+            frame_id = int(stereo.frame_id)
+            if self._last_processed_frame_id == frame_id:
+                return None
+            self._last_processed_frame_id = frame_id
 
         # 如果启动时使用了本地缓存预初始化，这里在收到网络 camera_info 后做一次校验刷新。
         self._refresh_calibration_from_network_if_needed()
@@ -803,12 +812,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="已用本地缓存预初始化后，收到不同网络 camera_info 时是否刷新标定与 PoseEstimator。",
     )
     parser.add_argument(
-        "--calib_dir",
-        type=Path,
-        default=PROJECT_DIR / "Calibration" / "20260322_070544",
-        help="本地标定目录（仅 camera_source=local 时使用）。",
-    )
-    parser.add_argument(
         "--camera_cache_dir",
         type=Path,
         default=PROJECT_DIR / "Calibration" / "cache",
@@ -1044,45 +1047,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return build_arg_parser().parse_args(argv)
 
 
-def _load_local_calib(
-    args: argparse.Namespace,
-    allow_legacy_fallback: bool = True,
-) -> QuestStereoCalibration | None:
-    """尝试从本地 camera_info 缓存加载标定，必要时回退到旧标定目录。
-
-    参数：
-    - allow_legacy_fallback: 是否允许读取旧 left/right_camera_characteristics.json。
-      pose_server 快速启动预加载只使用最新 camera_info 缓存，避免误用过期旧目录。
-    """
+def _load_cached_calib(args: argparse.Namespace) -> QuestStereoCalibration | None:
+    """尝试从本地 camera_info 缓存加载标定。"""
     import json as _json
     import msgpack as _msgpack
     from zmq_utils.payload.message.quest_camera_info_msg import QuestCameraInfoMsg
 
-    # 优先从缓存目录读取 camera_info_latest.json。
     cache_dir = Path(args.camera_cache_dir)
     latest_path = cache_dir / "camera_info_latest.json"
-    if latest_path.is_file():
-        try:
-            with latest_path.open("r", encoding="utf-8") as f:
-                data = _json.load(f)
-            # 将 JSON dict 重新序列化为 msgpack 再反序列化，确保字段完整。
-            payload = _msgpack.packb(data, use_bin_type=True)
-            msg = QuestCameraInfoMsg.deserialize(payload)
-            if msg is not None:
-                return QuestStereoCalibration.from_camera_info_msg(msg)
-        except Exception as exc:
-            logging.warning("[pipeline] 读取 camera_info_latest.json 失败: %s", exc)
-
-    if not allow_legacy_fallback:
+    if not latest_path.is_file():
         return None
 
-    # 回退到标定目录。
-    calib_dir = Path(args.calib_dir)
-    if calib_dir.is_dir():
-        left_path = calib_dir / "left_camera_characteristics.json"
-        right_path = calib_dir / "right_camera_characteristics.json"
-        if left_path.is_file() and right_path.is_file():
-            return QuestStereoCalibration.from_local_json(calib_dir)
+    try:
+        with latest_path.open("r", encoding="utf-8") as f:
+            data = _json.load(f)
+        # 将 JSON dict 重新序列化为 msgpack 再反序列化，确保字段完整。
+        payload = _msgpack.packb(data, use_bin_type=True)
+        msg = QuestCameraInfoMsg.deserialize(payload)
+        if msg is not None:
+            return QuestStereoCalibration.from_camera_info_msg(msg)
+    except Exception as exc:
+        logging.warning("[pipeline] 读取 camera_info_latest.json 失败: %s", exc)
 
     return None
 
@@ -1101,21 +1086,18 @@ def build_quest_pipeline(args: argparse.Namespace) -> QuestStereoPosePipeline:
             raise FileNotFoundError(f"必要文件不存在: {path}")
 
     # 标定预加载策略：
-    # - local：优先用本地缓存/标定目录初始化；失败后仍可等待网络 camera_info。
+    # - local：优先用本地 camera_info 缓存初始化；失败后仍可等待网络 camera_info。
     # - network + preload_camera_cache=1：先用本地缓存快速初始化 FoundationPose，
     #   后续收到网络 camera_info 后会按 network_calib_update 策略校验/刷新。
     calib: QuestStereoCalibration | None = None
-    should_preload_local_calib = args.camera_source == "local" or bool(
+    should_preload_cached_calib = args.camera_source == "local" or bool(
         getattr(args, "preload_camera_cache", 1)
     )
-    if should_preload_local_calib:
-        calib = _load_local_calib(
-            args,
-            allow_legacy_fallback=(args.camera_source == "local"),
-        )
+    if should_preload_cached_calib:
+        calib = _load_cached_calib(args)
         if calib is None and args.camera_source == "local":
             logging.warning(
-                "[pipeline] camera_source=local 但未找到本地标定，将等待网络 camera_info"
+                "[pipeline] camera_source=local 但未找到本地 camera_info 缓存，将等待网络 camera_info"
             )
         elif calib is not None and args.camera_source == "network":
             logging.info(

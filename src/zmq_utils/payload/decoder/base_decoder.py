@@ -8,7 +8,7 @@ class PayloadDecoder(ABC):
 
     约定：
     - 输入永远是网络层收到的单帧 bytes；
-    - 输出由具体业务解码器决定，例如 QuestStereoMsg、PoseMsg 或 RGBD 元组；
+    - 输出由具体业务解码器决定，例如 QuestStereoMsg、QuestCameraInfoMsg 或 PoseMsg；
     - 返回 None 表示 payload 非法或解码失败，上层应直接丢弃该帧。
     """
 
