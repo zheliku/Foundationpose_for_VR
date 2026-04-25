@@ -287,12 +287,13 @@ Quest stereo 帧较大，且 `pose_server` 启动阶段会初始化 TRT/Foundati
 
 ### 6.3 缓存策略
 
-`pose_server.py` 每次发现新的 camera_info digest 后：
+`pose_server.py` 每次发现 `QuestReceiver.get_camera_info_version()` 变化后：
 
 1. 将消息转为 JSON dict。
 2. 写入 `Calibration/cache/camera_info_latest.json`。
 3. 若与旧 latest 核心内容不同，先把旧文件备份为 `camera_info_<timestamp>.json`。
-4. 若内容不变，仅更新 `_received_at`。
+4. 若内容不变，仅更新 `_received_at` 与 `sender_mono_ms`。
+5. 核心内容比较必须排除 `_received_at` 和 `sender_mono_ms`，因为这两个字段每次接收/发送都会变化，不能作为相机标定是否变化的依据。
 
 Pipeline 启动策略：
 
@@ -522,6 +523,10 @@ Quest 额外包含：
 7. 项目代码中若干仍偏英文或过短的注释/文档字符串已补充为更详细中文说明。
 8. 新增 Quest 快速启动策略：`camera_source=network` 默认通过 `preload_camera_cache=1` 读取本地 `camera_info_latest.json` 预初始化 K/FoundationPose，收到 `quest_stereo` 后即可开始估计；网络 `quest_camera_info` 后续用于校验与刷新。
 9. 新增 `network_calib_update` 参数：默认收到不同网络标定后刷新 K/PoseEstimator 并重置跟踪；可设为 0 禁用自动刷新。
+10. `pose_server.py` 的 camera_info 缓存逻辑已改为通过 `QuestReceiver.get_camera_info_version()` 判断是否收到新 camera_info，不再使用手写 digest；保存 latest 时，核心内容比较会排除 `_received_at` 与 `sender_mono_ms`，避免每次发送时间不同导致误判标定变化。
+11. `QuestReceiver` 新增 `_camera_info_version` 与 `get_camera_info_version()`；每次成功解码 `quest_camera_info` 后版本号递增。上层若只想处理“新收到的 camera_info”，应使用该版本号，而不是重复读取 `_latest_camera_info` 后自行猜测。
+12. Unity `PayloadSender` 调整了发送节流：即使 encoder 暂时失败，也会更新该 Entry 的 `lastSendTime`，避免相机未就绪时每帧无限重试；发送统计日志改为按增量 `logInterval` 输出，避免总数卡在倍数时重复刷屏。
+13. Unity `PayloadReceiver` 增加 `_entriesByTopic` 路由表，主线程分发 payload 时按 topic O(1) 查找 decoder，并在配置重复 topic 时输出警告；多 topic latest-drain 行为保持不变。
 
 ## 13. 后续 AI 接手建议
 

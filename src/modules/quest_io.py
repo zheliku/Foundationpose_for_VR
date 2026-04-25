@@ -159,6 +159,7 @@ class QuestReceiver:
     # 缓存：按 topic 存储最新消息。
     _latest_stereo: QuestStereoMsg | None = None
     _latest_camera_info: QuestCameraInfoMsg | None = None
+    _camera_info_version: int = 0
 
     # 运行状态。
     _started: bool = False
@@ -195,6 +196,9 @@ class QuestReceiver:
 
         self.stereo_decoder = StereoDecoder()
         self.camera_info_decoder = CameraInfoDecoder()
+        self._latest_stereo = None
+        self._latest_camera_info = None
+        self._camera_info_version = 0
 
     def start(self) -> None:
         """启动网络接收器。"""
@@ -249,6 +253,10 @@ class QuestReceiver:
     def get_camera_info(self) -> QuestCameraInfoMsg | None:
         """获取最新相机信息（可能为 None，未收到过时）。"""
         return self._latest_camera_info
+
+    def get_camera_info_version(self) -> int:
+        """Return the latest camera_info message version."""
+        return self._camera_info_version
 
     def get_calibration(self) -> QuestStereoCalibration | None:
         """从最新相机信息构造标定对象。未收到时返回 None。"""
@@ -314,6 +322,7 @@ class QuestReceiver:
             return
         self._decoded_count += 1
         self._latest_camera_info = message
+        self._camera_info_version += 1
         logging.debug(
             "[QuestReceiver] camera_info updated: fx=%.1f baseline=%.4fm",
             message.left_fx,

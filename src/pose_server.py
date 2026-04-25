@@ -8,7 +8,6 @@ import logging
 import shutil
 import sys
 import time
-from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
@@ -29,6 +28,9 @@ from zmq_utils import PayloadSender, PoseEncoder  # noqa: E402
 from zmq_utils.payload.message.quest_camera_info_msg import QuestCameraInfoMsg  # noqa: E402
 
 
+CAMERA_INFO_VOLATILE_KEYS = frozenset({"_received_at", "sender_mono_ms"})
+
+
 # =========================
 # Camera Info 缓存管理
 # =========================
@@ -41,6 +43,11 @@ def _camera_info_to_dict(msg: QuestCameraInfoMsg) -> dict:
     # 利用 serialize -> unpackb 获得 flat dict。
     raw = _msgpack.unpackb(msg.serialize(), raw=False, strict_map_key=False)
     return dict(raw)
+
+
+def _camera_info_core_dict(info: dict) -> dict:
+    """Return camera_info fields that describe calibration, not send/receive time."""
+    return {k: v for k, v in info.items() if k not in CAMERA_INFO_VOLATILE_KEYS}
 
 
 def _save_camera_info(
@@ -66,8 +73,8 @@ def _save_camera_info(
                 existing = json.load(f)
 
             # 移除元数据后比较核心字段。
-            existing_core = {k: v for k, v in existing.items() if k != "_received_at"}
-            current_core = {k: v for k, v in current_dict.items() if k != "_received_at"}
+            existing_core = _camera_info_core_dict(existing)
+            current_core = _camera_info_core_dict(current_dict)
 
             if existing_core != current_core:
                 # 内容不同 -> 备份旧版。
@@ -272,7 +279,7 @@ def run_pose_server(args: argparse.Namespace) -> None:
     last_reset_t = start_t
 
     # camera_info 监控。
-    last_camera_info_digest: str | None = None
+    last_saved_camera_info_version = 0
 
     # 延迟统计（毫秒）。
     run_ms_ema = 0.0
@@ -353,13 +360,10 @@ def run_pose_server(args: argparse.Namespace) -> None:
             # 检查是否有新的 camera_info 并保存。
             camera_info = pipeline.camera.get_camera_info()
             if camera_info is not None:
-                info_digest = (
-                    f"{camera_info.left_fx:.2f}_{camera_info.left_fy:.2f}_"
-                    f"{camera_info.baseline_m:.6f}_{camera_info.sensor_width}"
-                )
-                if info_digest != last_camera_info_digest:
+                info_version = pipeline.camera.get_camera_info_version()
+                if info_version != last_saved_camera_info_version:
                     _save_camera_info(camera_info, camera_cache_dir)
-                    last_camera_info_digest = info_digest
+                    last_saved_camera_info_version = info_version
 
             # 可选自动重置。
             now_t = time.perf_counter()
