@@ -189,8 +189,10 @@ class QuestStereoPosePipeline:
     3. `stop()`：释放接收器资源。
 
     标定初始化策略：
-    - camera_source=network: 等待网络 camera_info 消息后懒初始化 K 和 PoseEstimator。
-    - camera_source=local: 从本地缓存或标定文件加载，立即初始化。
+    - camera_source=network + preload_camera_cache=1：优先用本地 camera_info_latest.json
+      预初始化 K 和 PoseEstimator，收到网络 camera_info 后再校验/刷新。
+    - camera_source=network + preload_camera_cache=0：严格等待网络 camera_info 后懒初始化。
+    - camera_source=local：从本地缓存或标定文件加载，立即初始化；失败后仍等待网络。
     """
 
     # 依赖注入。
@@ -272,6 +274,19 @@ class QuestStereoPosePipeline:
         if calib is not None:
             self._init_from_calibration(calib)
 
+    @staticmethod
+    def _make_calib_signature(calib: QuestStereoCalibration) -> tuple[float, ...]:
+        """生成标定参数签名，用于判断网络标定是否与预加载缓存不同。"""
+        return (
+            round(float(calib.left_fx), 4),
+            round(float(calib.left_fy), 4),
+            round(float(calib.left_cx), 4),
+            round(float(calib.left_cy), 4),
+            round(float(calib.baseline_m), 8),
+            float(int(calib.calib_width)),
+            float(int(calib.calib_height)),
+        )
+
     def _init_from_calibration(self, calib: QuestStereoCalibration) -> None:
         """根据标定参数初始化 K 和 PoseEstimator。"""
         self.calib = calib
@@ -324,6 +339,7 @@ class QuestStereoPosePipeline:
             debug_dir=None,
         )
         self._calib_initialized = True
+        self._calib_signature = self._make_calib_signature(calib)
 
     def _try_init_from_network(self) -> bool:
         """尝试从网络 camera_info 消息初始化标定。返回是否成功。"""
@@ -332,6 +348,32 @@ class QuestStereoPosePipeline:
             return False
         self._init_from_calibration(calib)
         return True
+
+    def _refresh_calibration_from_network_if_needed(self) -> None:
+        """若网络 camera_info 与预加载缓存不同，则刷新 K 与 PoseEstimator。
+
+        使用场景：
+        - pose_server 启动时可先用本地 camera_info_latest.json 预初始化 FoundationPose；
+        - 后续真正收到 Quest 端 camera_info 后，再用该方法校验是否需要切换到网络标定；
+        - 若已经进入跟踪，刷新标定会重置跟踪状态，保证后续 pose 使用正确 K。
+        """
+        if not bool(getattr(self.args, "network_calib_update", 1)):
+            return
+        if self.camera.get_camera_info() is None:
+            return
+
+        calib = self.camera.get_calibration()
+        if calib is None:
+            return
+
+        new_signature = self._make_calib_signature(calib)
+        old_signature = getattr(self, "_calib_signature", None)
+        if old_signature == new_signature:
+            return
+
+        logging.info("[QuestCalib] 网络 camera_info 与当前标定不同，刷新 K/PoseEstimator")
+        self._init_from_calibration(calib)
+        self.reset_tracking_state()
 
     def start(self) -> None:
         """启动 Pipeline：启动接收器并重置运行状态。"""
@@ -427,12 +469,14 @@ class QuestStereoPosePipeline:
         target_width: int,
         target_height: int,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Convert actual Quest stereo frames to the algorithm resolution.
+        """将实际接收到的 Quest 双目图归一化到算法处理分辨率。
 
-        Intrinsics are mapped from calibration space to the target frame by
-        QuestStereoCalibration.scaled_k(). This function only normalizes decoded
-        network images, so already-640x480 frames are not expanded back to the
-        active array and cropped a second time.
+        说明：
+        1. 相机内参 K 的映射已经在 QuestStereoCalibration.scaled_k() 中完成；
+           本函数只负责把网络解码后的图像尺寸调整到算法输入尺寸。
+        2. 若 Unity 端已经输出 640x480，这里不会再把图像扩回 active array，
+           也不会重复执行中心裁剪，避免图像与 K 出现二次映射误差。
+        3. 若左右图尺寸不同，先对齐到较小公共尺寸，再统一缩放到目标尺寸。
         """
         if self.calib is None:
             raise RuntimeError("标定尚未初始化，无法预处理图像。")
@@ -499,6 +543,9 @@ class QuestStereoPosePipeline:
 
         if stereo.left is None or stereo.right is None or stereo.timestamp_ms is None:
             return None
+
+        # 如果启动时使用了本地缓存预初始化，这里在收到网络 camera_info 后做一次校验刷新。
+        self._refresh_calibration_from_network_if_needed()
 
         left_bgr, right_bgr = self._preprocess_stereo_pair(
             stereo.left,
@@ -739,6 +786,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="标定来源：network=等待网络传输，local=优先本地缓存。",
     )
     parser.add_argument(
+        "--preload_camera_cache",
+        type=int,
+        default=1,
+        choices=[0, 1],
+        help=(
+            "camera_source=network 时是否先用本地 camera_info 缓存预初始化 K/FoundationPose。"
+            "1=有缓存则先初始化，随后收到网络标定时自动校验/刷新；0=严格等待网络标定。"
+        ),
+    )
+    parser.add_argument(
+        "--network_calib_update",
+        type=int,
+        default=1,
+        choices=[0, 1],
+        help="已用本地缓存预初始化后，收到不同网络 camera_info 时是否刷新标定与 PoseEstimator。",
+    )
+    parser.add_argument(
         "--calib_dir",
         type=Path,
         default=PROJECT_DIR / "Calibration" / "20260322_070544",
@@ -754,7 +818,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--calib_assume_center_crop",
         type=int,
         default=1,
-        help="Map intrinsics with center-crop+scale by default (1); use 0 for linear scale only.",
+        help="内参映射方式：1=按中心裁剪+缩放映射（默认），0=仅线性缩放。",
     )
     parser.add_argument(
         "--process_width",
@@ -905,7 +969,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--ffs_trt_feature_engine_path",
         type=str,
         default="",
-        help="TRT feature engine 路径；为空时按 tag 匹匹配。",
+        help="TRT feature engine 路径；为空时按 tag 自动匹配。",
     )
     parser.add_argument(
         "--ffs_trt_post_engine_path",
@@ -980,8 +1044,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return build_arg_parser().parse_args(argv)
 
 
-def _load_local_calib(args: argparse.Namespace) -> QuestStereoCalibration | None:
-    """尝试从本地缓存目录加载标定 JSON，再回退到标定目录。"""
+def _load_local_calib(
+    args: argparse.Namespace,
+    allow_legacy_fallback: bool = True,
+) -> QuestStereoCalibration | None:
+    """尝试从本地 camera_info 缓存加载标定，必要时回退到旧标定目录。
+
+    参数：
+    - allow_legacy_fallback: 是否允许读取旧 left/right_camera_characteristics.json。
+      pose_server 快速启动预加载只使用最新 camera_info 缓存，避免误用过期旧目录。
+    """
     import json as _json
     import msgpack as _msgpack
     from zmq_utils.payload.message.quest_camera_info_msg import QuestCameraInfoMsg
@@ -1000,6 +1072,9 @@ def _load_local_calib(args: argparse.Namespace) -> QuestStereoCalibration | None
                 return QuestStereoCalibration.from_camera_info_msg(msg)
         except Exception as exc:
             logging.warning("[pipeline] 读取 camera_info_latest.json 失败: %s", exc)
+
+    if not allow_legacy_fallback:
+        return None
 
     # 回退到标定目录。
     calib_dir = Path(args.calib_dir)
@@ -1025,13 +1100,26 @@ def build_quest_pipeline(args: argparse.Namespace) -> QuestStereoPosePipeline:
         if not Path(path).exists():
             raise FileNotFoundError(f"必要文件不存在: {path}")
 
-    # camera_source=local 时需要校验标定文件。
+    # 标定预加载策略：
+    # - local：优先用本地缓存/标定目录初始化；失败后仍可等待网络 camera_info。
+    # - network + preload_camera_cache=1：先用本地缓存快速初始化 FoundationPose，
+    #   后续收到网络 camera_info 后会按 network_calib_update 策略校验/刷新。
     calib: QuestStereoCalibration | None = None
-    if args.camera_source == "local":
-        calib = _load_local_calib(args)
-        if calib is None:
+    should_preload_local_calib = args.camera_source == "local" or bool(
+        getattr(args, "preload_camera_cache", 1)
+    )
+    if should_preload_local_calib:
+        calib = _load_local_calib(
+            args,
+            allow_legacy_fallback=(args.camera_source == "local"),
+        )
+        if calib is None and args.camera_source == "local":
             logging.warning(
                 "[pipeline] camera_source=local 但未找到本地标定，将等待网络 camera_info"
+            )
+        elif calib is not None and args.camera_source == "network":
+            logging.info(
+                "[pipeline] 已从本地 camera_info 缓存预初始化标定；等待网络 camera_info 后校验"
             )
 
     camera = QuestReceiver(

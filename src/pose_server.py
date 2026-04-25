@@ -288,11 +288,18 @@ def run_pose_server(args: argparse.Namespace) -> None:
         if show_stereo_window:
             cv2.namedWindow("PoseServer Stereo", cv2.WINDOW_AUTOSIZE)
 
-    # 窗口占位图：等待 pipeline 初始化、camera_info、首帧 stereo 期间避免窗口假死。
+    # 窗口占位图：等待首帧期间避免 OpenCV 窗口假死。
+    # 若已用本地 camera_info 缓存完成预初始化，则只需要等待 stereo 图像即可开始估计。
+    calib_ready_at_start = bool(getattr(pipeline, "_calib_initialized", False))
+    waiting_text = (
+        "Waiting for Quest stereo..."
+        if calib_ready_at_start
+        else "Waiting for Quest camera_info & stereo..."
+    )
     waiting_placeholder = np.zeros((240, 640, 3), dtype=np.uint8)
     cv2.putText(
         waiting_placeholder,
-        "Waiting for Quest camera_info & stereo...",
+        waiting_text,
         (20, 120),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.6,
@@ -302,13 +309,15 @@ def run_pose_server(args: argparse.Namespace) -> None:
 
     pipeline.start()
     logging.info(
-        "[pose_server] started recv=tcp://%s:%d pub=%s topic=%s stage=%d camera_source=%s",
+        "[pose_server] started recv=tcp://%s:%d pub=%s topic=%s stage=%d camera_source=%s calib_ready=%s preload_cache=%s",
         args.listen_host,
         int(args.listen_port),
         endpoint,
         topic,
         int(args.run_stage),
         args.camera_source,
+        "YES" if calib_ready_at_start else "NO",
+        int(getattr(args, "preload_camera_cache", 1)),
     )
 
     try:
@@ -323,14 +332,15 @@ def run_pose_server(args: argparse.Namespace) -> None:
                     key = cv2.waitKey(1) & 0xFF
                     if key in (27, ord("q")):
                         break
-                # 每 3 秒打印一次等待诊断，方便定位是缺 camera_info 还是缺 stereo。
+                # 每 3 秒打印一次等待诊断，方便定位是缺标定还是缺 stereo。
                 now_wait = time.perf_counter()
                 if now_wait - last_wait_log_t >= 3.0:
                     cam_info = pipeline.camera.get_camera_info()
                     stereo_peek = pipeline.camera._latest_stereo  # 仅诊断用
                     recv_stats = pipeline.camera.get_stats()
                     logging.info(
-                        "[pose_server] waiting... camera_info=%s stereo=%s recv=%s decoded=%s",
+                        "[pose_server] waiting... calib_ready=%s camera_info=%s stereo=%s recv=%s decoded=%s",
+                        "YES" if getattr(pipeline, "_calib_initialized", False) else "NO",
                         "OK" if cam_info is not None else "None",
                         "OK" if stereo_peek is not None else "None",
                         recv_stats.get("received", 0),

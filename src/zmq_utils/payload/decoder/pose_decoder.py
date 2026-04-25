@@ -5,13 +5,21 @@ from ..message.pose_msg import PoseMsg
 
 
 class PoseDecoder(PayloadDecoder):
-    """Decode single pose payload bytes."""
+    """将单帧 Pose payload 解码为便于 Python 调试使用的字典。
+
+    说明：
+    - 主链路中 Pose 通常由 Python 发送、Unity 接收；
+    - 该解码器主要用于 Python 侧测试/回环/诊断；
+    - 字段名保持与 PoseMsg 一致，避免协议转换时引入歧义。
+    """
 
     def decode(self, payload: bytes) -> dict[str, object] | None:
+        # 先复用 PoseMsg 的统一反序列化与基础校验逻辑。
         message = PoseMsg.deserialize(payload)
         if message is None:
             return None
 
+        # 输出普通 dict，便于日志、测试断言和临时脚本直接使用。
         return {
             "timestamp_ms": float(message.timestamp_ms),
             "stage": int(message.stage),

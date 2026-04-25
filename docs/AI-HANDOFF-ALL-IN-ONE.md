@@ -1,459 +1,563 @@
 # Foundationpose_for_VR 项目总交接文档（唯一入口）
 
-更新时间：2026-04-24
+更新时间：2026-04-26
 
-本文件是项目唯一长期维护的 AI 接手文档。历史会话文档已融合并清理，后续请只更新本文件。
+本文件是项目唯一长期维护的 AI 接手文档。历史会话记录已重新核对并压缩，后续请优先更新本文件，避免再产生多份互相冲突的交接文档。
 
-## 1. 项目目标
+## 1. 项目目标与当前主线
 
-- 目标：实现 VR 场景中的实时 6D 位姿估计与可视化。
-- 现阶段主线：双目图像输入 -> 2D 分割 -> 双目深度 -> 6D 位姿（FoundationPose）。
-- 核心原则：链路可运行优先、模块解耦优先、可观测性优先。
+### 1.1 总目标
 
-## 2. 当前可运行主链路
+实现 VR/Quest 场景中的实时 6D 位姿估计与 Unity 可视化：
 
-### 2.1 Quest 链路
+1. Unity/Quest 采集左右 Passthrough 相机图像与相机静态信息。
+2. Python 服务端接收双目图和相机信息。
+3. Python 侧执行 2D 分割、双目深度估计和 FoundationPose 6D 位姿估计。
+4. Python 将位姿结果通过 ZMQ PUB topic 回传 Unity。
+5. Unity 解码位姿，按发送帧号对齐当时相机/参考节点姿态后，把物体放回世界坐标。
 
-- 入口脚本：src/pipeline/quest_pipeline.py
-- 数据流：QuestReceiver（双 topic SUB: quest_stereo + quest_camera_info） -> Yoloe26Masker -> FastFoundationStereoRealtime -> FoundationPoseEstimator
-- 可选增强：CutieTracker 用于 2D 跟踪引导
-- 标定来源：默认从网络 camera_info 消息获取（camera_source=network），也可从本地缓存/标定目录加载（camera_source=local）
+### 1.2 当前主线链路
 
-### 2.2 RealSense 链路
+当前重点不是旧的单脚本 demo，而是结构化链路：
 
-- 入口脚本：src/pipeline/realsense_pipeline.py
-- 数据流：RealSenseCamera -> Yoloe26Masker -> FastFoundationStereoRealtime -> FoundationPoseEstimator
-- 可选增强：CutieTracker 用于 2D 跟踪引导
+- Quest 主链路：Unity 多 topic 发送 → Python `pose_server.py` → Quest Pipeline → 位姿 topic 回传 Unity。
+- RealSense 调试链路：RealSense 本机双目 → RealSense Pipeline → OpenCV 本地窗口调试。
+- 深度主方案：Fast-FoundationStereo，默认优先 TensorRT，缺少 engine 时可按参数回退 PyTorch。
+- 位姿主方案：FoundationPose register + track。
+- 2D 主方案：YOLOE-26 语义分割，Cutie 可选用于后续帧 2D 跟踪辅助。
 
-### 2.3 分阶段调试（两条链路一致）
+### 1.3 当前工程原则
 
-- stage 1：仅输入
-- stage 2：输入 + YOLO 分割
-- stage 3：输入 + YOLO + 深度
-- stage 4：全链路（含 FoundationPose）
+- 链路可运行优先：协议变更必须 Python/Unity 同步。
+- 模块边界清晰：相机、网络、编码、Pipeline、位姿应用互相解耦。
+- 可观测性必须保留：阶段、phase、检测数、深度有效率、耗时分项、FPS、收发统计。
+- 不恢复旧兼容分支：旧入口、旧 topic/PUSH/PULL、旧 packed 图像协议、旧 TRT legacy 命名均不应回流。
 
-## 3. 代码结构（当前有效）
+## 2. 当前可运行入口
 
-### 3.1 核心模块目录
+### 2.1 Python Quest 位姿服务（推荐主入口）
 
-- src/modules/realsense.py
-- src/modules/quest_io.py
-- src/modules/yoloe26.py
-- src/modules/fast_foundationstereo.py
-- src/modules/foundationpose.py
-- src/modules/cutie.py
+运行目录：`Foundationpose_for_VR`
 
-### 3.2 编排层目录
+```powershell
+pixi run python .\src\pose_server.py
+```
 
-- src/pipeline/realsense_pipeline.py
-- src/pipeline/quest_pipeline.py
+职责：
 
-### 3.3 已清理的旧入口/旧链路（不要恢复）
+- 接收 Unity 发来的 `quest_stereo` 与 `quest_camera_info` 两个 topic。
+- 构建并运行 Quest Pipeline。
+- 缓存 `camera_info_latest.json`。
+- 发布 `pose` topic 给 Unity。
+- 可选显示本地 OpenCV 调试窗口。
 
-- src/pose_tracker_api.py
-- src/vpt_cli.py
-- src/VOT.py
-- src/zmq_utils/timing.py
-- src/zmq_utils/latency.py
-- src/modules/quest_stereo.py（已重命名为 quest_io.py）
-- src/modules/quest_receiver.py（已重命名为 quest_io.py）
-- Assets/Scripts/Net/Payload/Encoder/StaticStereoEncoder.cs（旧测试用编码器，已删除）
+常用参数：
 
-## 4. 运行方式（常用）
+```powershell
+pixi run python .\src\pose_server.py --run_stage 4 --camera_source network --local_debug 1
+```
 
-在 Foundationpose_for_VR 目录执行：
+### 2.2 Python Quest Pipeline 本地调试入口
 
-- Quest：pixi run python .\src\pipeline\quest_pipeline.py
-- RealSense：pixi run python .\src\pipeline\realsense_pipeline.py
+```powershell
+pixi run python .\src\pipeline\quest_pipeline.py
+```
 
-窗口热键（main 示例）：
+说明：
 
-- 1/2/3/4：切换阶段
-- r：重置跟踪状态
-- q 或 ESC：退出
+- 只跑 Quest 输入 → YOLO → FFS → FoundationPose 的 pipeline 示例。
+- 不负责将 pose 回传 Unity；回传请使用 `pose_server.py`。
 
-## 5. 调试信息与统计口径（当前定义）
+### 2.3 Python RealSense Pipeline 本地调试入口
 
-### 5.1 HUD
+```powershell
+pixi run python .\src\pipeline\realsense_pipeline.py
+```
 
-- HUD 使用统一函数 \_draw_hud（已合并原先 \_draw_text 与 \_draw_hud_lines）。
-- 文本支持按窗口宽度自动换行，避免遮挡。
-- 首行 fps 为实时帧率（不是累计均值）。
+说明：
 
-### 5.2 FPS 定义
+- 用 RealSense 左右红外作为双目输入。
+- 适合在无 Quest/Unity 联调时验证 YOLO、FFS、FoundationPose 基础能力。
 
-- 实时 fps：基于相邻帧间隔 1/dt 计算，并用 EMA 平滑。
-- 统计日志字段：
-  - rt_fps：实时平滑 fps
-  - window_fps：统计窗口 fps（按 stats_interval 计算）
+### 2.4 pixi 任务入口
 
-### 5.3 Quest 双 Topic 通信口径（当前定义）
+`pixi.toml` 当前有效任务：
 
-- Unity 侧 PayloadSender 统一使用 PUB 模式，支持多个 SenderEntry（encoder + topic + targetFps）。
-- Unity 侧 PayloadReceiver 统一使用 SUB 模式，支持多个 ReceiverEntry（topic + decoder），后台线程 drain 时按 topic 分别缓存最新帧。
-- Python 侧 PayloadSender 统一 PUB 模式，send_payload 必须指定 topic。
-- Python 侧 PayloadReceiver 统一 SUB 模式：
-  - recv_all_latest_by_topic：按 topic 分别 drain，返回 {topic: payload} 字典，适合多 topic 场景。
-  - recv_frame_latest：不区分 topic drain，仅适合单 topic 场景。
-- Topic 名称约定：
-  - quest_stereo：双目图像帧（高频，约 10fps）。
-  - quest_camera_info：相机静态标定信息（低频，约 1fps，内容通常不变）。
-  - pose：位姿结果（服务端发布，Unity 接收）。
+- `pixi run build`：构建 FoundationPose C++ 扩展、导出 ONNX、构建 TRT engine。
+- `pixi run demo-yoloe`：运行 RealSense pipeline 测试 YOLOE/主链路。
+- `pixi run demo-pipeline`：当前已指向 `src/pipeline/quest_pipeline.py`。
 
-### 5.4 Camera Info 缓存策略（当前定义）
-
-- pose_server 每次接收到 quest_camera_info 消息后：
-  - 与本地 camera_info_latest.json 比较。
-  - 若内容不同 → 备份旧版为 camera_info_<timestamp>.json，保存新版。
-  - 若内容相同 → 仅更新 _received_at 时间戳。
-- Pipeline 启动时：
-  - camera_source=local → 优先从缓存目录/标定目录加载，无缓存时等待网络。
-  - camera_source=network → 仅等待网络 camera_info 消息。
-- QuestStereoCalibration 构造方式：
-  - QuestCameraInfoMsg.from_camera_info_msg()：从网络消息构造。
-  - QuestStereoCalibration.from_local_json()：从本地 JSON 构造（旧工作流兼容）。
-
-### 5.5 Fast-FoundationStereo TRT 产物与命名口径（当前定义）
-
-- TRT/ONNX 命名已统一为参数标签，不再使用旧兼容命名：
-  - tag 规则：`h{height}-w{width}-it{valid_iters}-md{max_disp}`
-  - ONNX：`feature_runner-{tag}.onnx`、`post_runner-{tag}.onnx`
-  - Engine：`feature_runner-{tag}.{platform}.{precision}.engine`、`post_runner-{tag}.{platform}.{precision}.engine`
-- 兼容策略已收敛：
-  - 不再生成 legacy alias；
-  - 不再回退 legacy 文件名；
-  - 运行时仅按新命名匹配。
-- 配置口径已收敛：
-  - 不再导出 `onnx.yaml`；
-  - 运行时 TRT 配置由代码按当前参数构造（不依赖 YAML 元数据文件）。
-
-### 5.6 相机封装边界口径（当前定义）
-
-- RealSense：
-  - `pyrealsense2` 仅允许在 `src/modules/realsense.py` 内部使用；
-  - 调用方（modules/pipeline）统一通过 `RealSenseCamera.get_stereo_calibration()` 获取 `fx/fy/cx/cy/baseline/depth_scale`；
-  - 不应在调用方直接访问 `camera.pipeline`。
-- Quest：
-  - 标定读取职责已下沉到 `src/modules/quest_io.py`；
-  - 调用方统一通过 `QuestReceiver.get_calibration()` 获取标定对象；
-  - `quest_pipeline.py` 不再维护本地 `_load_calibration`。
-
-### 5.7 FFS 性能计时口径（当前定义）
-
-- `FastFoundationStereoRealtime.predict_depth(return_timing=True)` 中：
-  - `prep_ms`：输入预处理（numpy->tensor、缩放、维度转换等）；
-  - `forward_ms`：网络前向推理；
-  - `post_ms`：后处理（回 CPU、视差转深度、尺寸恢复等）；
-  - `infer_ms`：`prep + forward + post` 总耗时。
-- 因此，`infer_ms` 不是“纯模型 forward 时间”，与官方只统计 forward 的 profiling 脚本口径不同。
-
-## 6. 关键工程约束
-
-- 不要把网络地址写死在代码里，配置应可外部输入并可持久化。
-- 数据提供方与发送方保持解耦，便于静态图测试与模块复用。
-- API 改动优先保持最小闭环，避免跨模块大改。
-- 可观测性必须保留：阶段、检测数、深度有效率、耗时分项、fps。
-
-## 7. 历史问题与已落地修复（融合摘要）
-
-- 处理分辨率与标定分辨率不一致会导致位姿系统性误差，已引入中心裁剪+缩放 K 映射策略。
-- FoundationPose 导入符号与 Utils 冲突问题已做隔离处理。
-- debug_dir 空值崩溃、模块同名遮蔽、导出符号不稳定等问题均已修复。
-- Packed 单图策略存在质量/稳定性风险，调试基线优先 Dual 思路。
-
-## 8. 工作日志（按日期）
-
-### 8.1 今日工作总结（2026-04-06）
-
-#### 8.1.1 代码清理与架构收敛
-
-- 清理了历史旧入口与过期测试依赖，主入口收敛到 pipeline 目录。
-- 统一改为“模块 API + pipeline 编排”模式，减少分散脚本。
-
-#### 8.1.2 API 风格统一
-
-- 移除了 Config 类中间层，改为直接参数调用。
-- 统一了 modules 与 pipeline 的类成员声明方式：
-  - 类体显式成员清单
-  - 成员分组
-  - 中文注释
-- **init** 文档补齐并精简，默认值尽量下沉到类体。
-
-#### 8.1.3 初始化与执行策略修正
-
-- start() 职责收敛为启动与状态重置，不再做重初始化杂项。
-- Quest 链路保留在 **init** 完成 K 与 PoseEstimator 初始化。
-- RealSense 链路保留 run() 首帧懒初始化路径。
-
-#### 8.1.4 调试显示修复
-
-- 修复了 Quest/RealSense 窗口 HUD 文本溢出问题。
-- 将 fps 从累计均值改为实时帧率显示。
-- 合并 HUD 绘制方法，减少重复逻辑并统一样式。
-
-### 8.2 今日工作总结（2026-04-09）
-
-本次工作主要围绕「网络协议收敛 + MessagePack 全链路统一 + Windows/pixi 环境稳定化 + ONNX 导出回归验证」。
-
-#### 8.2.1 协议与通信层重构（Python）
-
-- 统一为单帧 payload 模式，移除多段 parts/multipart 兼容路径。
-- `PayloadSender`/`PayloadReceiver` 改为 single-payload 主接口：
-  - sender 统一发送 `bytes`；
-  - receiver 统一接收 `bytes`；
-  - Quest 接收侧启用 conflate/latest 语义，保留“只消费最新帧”的实时策略。
-- 删除旧统计与旧模式诊断路径：
-  - 移除 drained、`_sender_meta_count`、`_sender_no_meta_count` 等旧口径；
-  - 移除 `_infer_payload_mode` 及其调用。
+注意：旧 `src/quest_stereo_pose_pipeline.py` 不存在，不能再作为任务入口。
 
-#### 8.2.2 序列化统一为 MessagePack（Python）
+## 3. 分阶段调试口径
 
-- 以下消息模型已改为 MessagePack：
-  - `src/zmq_utils/payload/message/pose.py`
-  - `src/zmq_utils/payload/message/rgbd.py`
-  - `src/zmq_utils/payload/message/stereo.py`
-- `PoseMsg` API 已收口为仅保留 `serialize/deserialize`，不再保留 JSON 路径。
-- 编解码层同步改造：
-  - `src/zmq_utils/payload/encoder/base_encoder.py`
-  - `src/zmq_utils/payload/decoder/base_decoder.py`
-  - `src/zmq_utils/payload/encoder/pose_encoder.py`
-  - `src/zmq_utils/payload/decoder/pose_decoder.py`
-  - `src/zmq_utils/payload/encoder/rgbd_encoder.py`
-  - `src/zmq_utils/payload/decoder/rgbd_decoder.py`
-  - `src/zmq_utils/payload/decoder/stereo_decoder.py`
+Quest 与 RealSense Pipeline 统一使用 4 个阶段：
 
-#### 8.2.3 Unity 侧同步（C#）
+1. stage 1：仅输入图像。
+2. stage 2：输入 + YOLOE 2D 分割。
+3. stage 3：输入 + YOLOE + Fast-FoundationStereo 深度。
+4. stage 4：完整链路，包含 FoundationPose register/track。
 
-- Unity 网络层已同步到 MessagePack：
-  - `Assets/Scripts/Net/Payload/Message/PoseMsg.cs`
-  - `Assets/Scripts/Net/Payload/Message/RGBDMsg.cs`
-  - `Assets/Scripts/Net/Payload/Message/QuestStereoMsg.cs`
-- Unity 编解码器与收发器同步更新：
-  - `Assets/Scripts/Net/Communicate/PayloadSender.cs`
-  - `Assets/Scripts/Net/Communicate/PayloadReceiver.cs`
-  - `Assets/Scripts/Net/Payload/Encoder/*.cs`
-  - `Assets/Scripts/Net/Payload/Decoder/*.cs`
-- 删除旧 `TryDeserialize` 路径，反序列化入口收敛为 `Deserialize`。
+窗口热键：
 
-#### 8.2.4 Windows + pixi 环境排障与收敛
+- `1/2/3/4`：切换阶段。
+- `r`：重置跟踪状态，下一次有效 mask 会重新 register。
+- `q` 或 `ESC`：退出。
+
+## 4. 当前代码结构
+
+### 4.1 Python 核心模块
+
+- `src/modules/realsense.py`
+  - 封装 `pyrealsense2`。
+  - 对外提供 `RealSenseCamera.get_stereo_frames()`、`get_aligned_rgbd_frames()`、`get_stereo_calibration()`。
+  - 调用方不应直接访问 RealSense SDK 或 `camera.pipeline`。
+
+- `src/modules/quest_io.py`
+  - Quest 多 topic 接收模块。
+  - 对外提供 `QuestReceiver.get_stereo_frames()`、`get_camera_info()`、`get_calibration()`。
+  - 内部使用 `recv_all_latest_by_topic()`，避免多 topic drain 丢消息。
 
-- 目标：移除临时 pip 安装痕迹，恢复“全部由 pixi 管理”。
-- 处理过程：
-  - 清理并重建 `.pixi/envs/default`；
-  - 处理 Windows 文件锁问题（VS Code Black Formatter 的 Python LSP 占用环境文件）；
-  - 依赖声明确认：`pixi.toml` 现包含 `msgpack`、`onnx`、`pillow`（均由 pixi 解析与安装）。
-- 为解决 Windows 下 `torchvision -> PIL.Image` 导入链不稳定问题：
-  - 在 `Fast-FoundationStereo/core/foundation_stereo.py` 顶部预加载 Pillow。
+- `src/modules/yoloe26.py`
+  - YOLOE-26 分割封装。
+  - 输入 BGR/灰度图，输出 overlay、二值 mask、检测数和耗时。
 
-#### 8.2.5 ONNX 导出回归验证（已通过）
+- `src/modules/fast_foundationstereo.py`
+  - Fast-FoundationStereo 实时深度封装。
+  - 内部有 `_PyTorchStereoBackend` 与 `_TrtStereoBackend` 双后端。
+  - 默认可优先 TRT；TRT 不可用时由 `trt_strict` 控制是否回退 PyTorch。
 
-- 验证命令（示例）：
-  - `pixi run python scripts/make_onnx.py --model_dir weights/20-30-48/model_best_bp2_serialize.pth --save_path output/`
-- 产物已生成：
-  - `Fast-FoundationStereo/output/feature_runner.onnx`
-  - `Fast-FoundationStereo/output/post_runner.onnx`
-  - `Fast-FoundationStereo/output/onnx.yaml`
-- 备注：脚本当前对 `save_path` 参数较敏感，建议使用目录形式并带尾部斜杠（如 `output/`）。
+- `src/modules/foundationpose.py`
+  - FoundationPose 封装。
+  - 提供 `register()`、`track()`、`visualize_pose()`、`adjust_pose_to_image_point()`。
+  - 已隔离 `FoundationPose.Utils` 与 Fast-FoundationStereo `Utils` 同名导入冲突。
 
-#### 8.2.6 运行状态与观察
+- `src/modules/cutie.py`
+  - Cutie 2D tracker 封装。
+  - 可用 YOLO mask 初始化，后续输出 bbox/mask 辅助 FoundationPose 跟踪。
 
-- `src/pose_server.py` 在当前环境可持续运行并输出统计日志。
-- 统计字段中 `sender_raw` 数值很大属于跨进程/跨设备时钟基准差异，不应直接解释为真实网络延迟；优先关注 `sender_est` 与趋势变化。
+### 4.2 Python 编排层
+
+- `src/pipeline/quest_pipeline.py`
+  - Quest 输入完整算法链路。
+  - `camera_source=network` 默认会先尝试读取 `Calibration/cache/camera_info_latest.json` 预初始化 K/FoundationPose，随后收到网络 camera_info 时校验并按需刷新。
+  - `--preload_camera_cache 0` 可关闭该快速启动策略，恢复为严格等待网络 camera_info。
+  - `camera_source=local` 时优先读 `Calibration/cache/camera_info_latest.json`，再回退旧本地标定目录；失败后仍等待网络。
 
-#### 8.2.7 当前改动规模（Foundationpose_for_VR 子仓）
+- `src/pipeline/realsense_pipeline.py`
+  - RealSense 输入完整算法链路。
+  - 首帧运行时懒读取 RealSense 标定并构建 FoundationPoseEstimator。
 
-- 变更文件：19 个。
-- 变更量：457 insertions / 612 deletions。
-- 主体为协议收敛与旧兼容路径删除，属于“行为统一 + 技术债清理”型改造。
+- `src/pose_server.py`
+  - 当前 Quest 端到端服务主入口。
+  - 负责 pose 发布、camera_info 缓存、延迟统计、本地 debug 窗口和键盘控制。
 
-### 8.3 今日工作总结（2026-04-10）
+### 4.3 Python 网络与协议层
 
-本次工作主要围绕「Fast-FoundationStereo TRT 工程化收敛 + 命名规范统一 + 运行时结构简化」。
+- `src/zmq_utils/communicate/sender.py`
+  - `PayloadSender`，统一 PUB 模式。
+  - `send_payload(payload, topic)` 必须显式指定 topic。
 
-#### 8.3.1 TRT 构建链路收敛（pixi 一键化）
+- `src/zmq_utils/communicate/receiver.py`
+  - `PayloadReceiver`，统一 SUB 模式。
+  - 多 topic 场景必须用 `recv_all_latest_by_topic()`。
+  - `recv_frame_latest()` 只适合单 topic，因为它不区分 topic drain。
 
-- `pixi.toml` 任务已整理为从 pth -> onnx -> engine 的一键链路（`pixi run build`）。
-- 构建范围覆盖 `weights` 下 3 个模型目录，并按多参数组批量导出（当前基线包含 640x480、valid_iters=4/8）。
-- 产物落地到各自权重目录，便于运行时按目录 + tag 精确选择。
+- `src/zmq_utils/payload/message/*.py`
+  - MessagePack 消息定义：`PoseMsg`、`QuestStereoMsg`、`QuestCameraInfoMsg`、`RGBDMsg`。
 
-#### 8.3.2 导出与构建脚本规范化
+- `src/zmq_utils/payload/encoder/*.py` / `decoder/*.py`
+  - 业务对象和 MessagePack payload 之间的转换层。
 
-- `Fast-FoundationStereo/scripts/make_onnx.py` 与 `Fast-FoundationStereo/scripts/build_trt_engine.py` 已重构为清晰的 argparse 流程。
-- 输出命名全部改为 tag 化；已移除 legacy alias 及旧命名兼容分支。
-- `make_onnx.py` 已去除 `onnx.yaml` 生成逻辑，目录更干净。
+### 4.4 Unity 侧脚本
 
-#### 8.3.3 TRT 运行时口径收敛（Python）
+- `Assets/Scripts/Net/Communicate/PayloadSender.cs`
+  - 多 `SenderEntry` PUB 发送器。
+  - 每个 Entry 独立绑定 `encoder + topic + targetFps`。
+  - Quest 发送端通常配置：
+    - `quest_stereo`：绑定 `QuestStereoEncoder`，高频。
+    - `quest_camera_info`：绑定 `QuestCameraInfoEncoder`，低频。
 
-- `src/modules/fast_foundationstereo.py` 已默认 TRT 优先，失败时按策略回退 PyTorch（`trt_strict` 可控）。
-- 运行时仅匹配新命名产物，不再使用旧文件名回退。
-- TRT 配置不再依赖 YAML 文件，改为运行时按参数构造，避免元数据文件分散。
+- `Assets/Scripts/Net/Communicate/PayloadReceiver.cs`
+  - 多 `ReceiverEntry` SUB 接收器。
+  - 后台线程按 topic 分别缓存最新 payload，主线程分发到对应 decoder。
+  - Unity 接收 pose 时通常订阅 `pose` topic 并绑定 `PoseDecoder`。
 
-#### 8.3.4 FFS 模块代码结构重构与精简
+- `Assets/Scripts/Net/Payload/Encoder/QuestStereoEncoder.cs`
+  - 读取左右 PassthroughCameraAccess 纹理。
+  - 左右图分别 JPEG 编码，封装为 `QuestStereoMsg`。
+  - 编码成功后触发 `OnFrameEncoded(frame_id)`，供 `PoseFollow` 缓存发送时参考姿态。
 
-- `FastFoundationStereoRealtime` 已改为“统一调度 + 双后端类”结构：
-  - `_PyTorchStereoBackend`：PyTorch 模型加载与推理；
-  - `_TrtStereoBackend`：engine 匹配、runner 初始化与 TRT 推理。
-- 清理了若干一跳封装与重复辅助逻辑（如 trivial sync 封装），并将 TRT 专属工具函数内聚到 TRT 后端类。
-- 在不改变功能的前提下缩减行数并提升逻辑关联性与可读性。
+- `Assets/Scripts/Net/Payload/Encoder/QuestCameraInfoEncoder.cs`
+  - 读取左右相机内参、分辨率、镜头偏移、基线等静态信息。
+  - 带 digest 缓存，信息不变时复用已编码 payload。
 
-#### 8.3.5 TRT demo 脚本同步
+- `Assets/Scripts/Net/Payload/Decoder/PoseDecoder.cs`
+  - 解码 Python 回传的 `PoseMsg`。
+  - 默认执行 OpenCV 相机坐标到 Unity 坐标的转换。
+  - 有效位姿通过 `OnPoseReceived(Pose, frame_id)` 事件派发。
 
-- `Fast-FoundationStereo/scripts/run_demo_tensorrt.py` 已同步到“无 YAML”模式。
-- demo 通过参数直接构造 tag 并定位 engine，行为与主线口径一致。
+- `Assets/Scripts/PoseFollow.cs`
+  - 消费 `PoseDecoder` 事件。
+  - 通过 `frame_id` 查找 `QuestStereoEncoder.OnFrameEncoded` 时缓存的 sourceTarget 姿态。
+  - 将 Python 回传的相机系位姿转换到 Unity 世界坐标并应用到当前 Transform。
 
-### 8.4 今日工作总结（2026-04-24）
+- `Assets/Scripts/PoseSmoother.cs`
+  - `PoseFollow` 的指数平滑插件。
+  - 平滑逻辑按 Unity `Update()` 频率运行，不被网络回包帧率限制。
 
-本次工作主要围绕「Quest 双 Topic 通信重构 + Sender/Receiver 多 topic 架构统一 + Camera Info 缓存策略 + 旧兼容清理」。
+- `Assets/Scripts/PcaApiInfoDumper.cs`
+  - PassthroughCameraAccess API 信息导出工具。
+  - 用于排查左右相机分辨率、内参、镜头偏移和纹理状态。
 
-#### 8.4.1 新增 QuestCameraInfoMsg 消息（Python + C#）
+- `Assets/Scripts/CameraViewerManager.cs`
+  - 本地 UI 显示左右 Passthrough 相机纹理，便于 Quest 端可视化联调。
 
-- Python: src/zmq_utils/payload/message/quest_camera_info_msg.py
-- C#: Assets/Scripts/Net/Payload/Message/QuestCameraInfoMsg.cs
-- 包含左右目内参、畸变、基线、传感器分辨率、有效阵列区域、当前分辨率、帧率、镜头偏移位置/旋转等所有静态信息。
+## 5. 当前网络协议与 topic 约定
 
-#### 8.4.2 新增编码器/解码器
+### 5.1 总体约定
 
-- C# QuestCameraInfoEncoder: Assets/Scripts/Net/Payload/Encoder/QuestCameraInfoEncoder.cs
-  - 带摘要缓存，仅当相机信息变化时重新编码。
-- Python CameraInfoDecoder: src/zmq_utils/payload/decoder/camera_info_decoder.py
+Python 与 Unity 当前统一为：
 
-#### 8.4.3 PayloadSender/PayloadReceiver 多 Topic 重构（C# + Python）
+- ZMQ PUB/SUB。
+- multipart `[topic, payload]`。
+- payload 为单帧 MessagePack bytes。
+- 不再使用 PUSH/PULL。
+- 不再使用 multipart 业务分片。
+- 不再保留旧 JSON pose 路径。
 
-- C# PayloadSender：改为 List<SenderEntry> 配置，每个 Entry 独立编码器+topic+帧率，统一 PUB 模式。
-- C# PayloadReceiver：改为 List<ReceiverEntry> 配置，每个 Entry 独立 topic+解码器，统一 SUB 模式，按 topic 路由分发。
-- Python PayloadSender：移除 PUSH 模式和 default_topic，统一 PUB，topic 必填。
-- Python PayloadReceiver：移除 PULL 模式，统一 SUB，支持多 topics 订阅，recv_frame_latest 返回 (topic, payload) 元组。
+### 5.2 Topic 名称
 
-#### 8.4.4 quest_stereo.py → quest_receiver.py 重命名与重构
+- `quest_stereo`
+  - Unity → Python。
+  - 高频双目 JPEG 图像。
+  - 消息类型：`QuestStereoMsg`。
 
-- QuestStereoCamera → QuestReceiver，支持双 topic 接收。
-- 新增 poll_all() 方法：轮询所有 topic 并更新缓存。
-- 新增 get_camera_info() / get_calibration() 接口。
-- QuestStereoCalibration 新增 from_camera_info_msg() 和 from_local_json() 类方法。
-- 移除本地文件读取的 get_stereo_calibration(calib_dir) 旧接口。
+- `quest_camera_info`
+  - Unity → Python。
+  - 低频相机静态信息。
+  - 消息类型：`QuestCameraInfoMsg`。
 
-#### 8.4.5 quest_pipeline.py 懒初始化改造
+- `pose`
+  - Python → Unity。
+  - 位姿与调试状态。
+  - 消息类型：`PoseMsg`。
 
-- 标定初始化改为懒初始化：camera_source=network 时等待网络 camera_info，camera_source=local 时优先本地。
-- 新增 _init_from_calibration / _try_init_from_network 内部方法。
-- 新增 --camera_source 和 --camera_cache_dir 命令行参数。
+### 5.3 多 topic drain 关键点
 
-#### 8.4.6 pose_server.py 双 Topic 处理 + 缓存
+多 topic 场景严禁用“不区分 topic 的 drain”作为主循环消费方式，否则可能只保留最后一个 topic，导致另一个 topic 被丢弃。
 
-- 运行时监控 camera_info 变化并自动保存到本地缓存目录。
-- 内容变化时备份旧版，保存新版。
-- PayloadSender.send_payload 调用已改为必须传入 topic 参数。
+当前修复策略：
 
-#### 8.4.7 旧兼容代码清理
+- Python：`PayloadReceiver.recv_all_latest_by_topic()` 按 topic 保存最新 payload。
+- QuestReceiver：`poll_all()` 使用 `recv_all_latest_by_topic()`。
+- Unity：`PayloadReceiver.ReceiveLoop()` drain 时每条消息按 topic 写入 `_latestByTopic`。
 
-- QuestStereoMsg：移除 packed_image_jpeg_legacy 字段和旧协议反序列化分支。
-- StereoDecoder：移除旧协议解码分支。
-- PayloadSender.cs：移除 PUSH 模式和 SenderUseTopicLegacyPrefKey 旧键。
-- PayloadReceiver.cs：移除 PULL 模式和 RawPayloadEvent。
-- 删除 StaticStereoEncoder.cs（旧测试用编码器，无引用）。
-- 删除 quest_stereo.py（已重命名为 quest_receiver.py）。
+### 5.4 HWM 经验值
 
-### 8.5 今日工作总结补充（2026-04-10）
+Quest stereo 帧较大，且 `pose_server` 启动阶段会初始化 TRT/FoundationPose/Warp，可能持续数秒。
 
-本次补充主要围绕「相机封装边界修正 + Pipeline 命名与职责收敛 + FFS 参数对齐 + 性能口径澄清」。
+当前建议：
 
-#### 8.4.1 RealSense 封装边界修正
+- Python Quest 接收端 `recv_hwm` 默认 20。
+- Unity stereo 发送端不要把发送 HWM 设得过大，避免排队延迟。
+- pose 发布端可用较低 HWM（如 1），保证 Unity 侧只消费最新 pose。
 
-- 在 `src/modules/realsense.py` 新增 `StereoCalibration` 与 `get_stereo_calibration()`。
-- `src/modules/fast_foundationstereo.py` 的 main 示例已改为通过 `RealSenseCamera` 读取标定，移除直接 `pyrealsense2` 与 `camera.pipeline` 访问。
-- `src/pipeline/realsense_pipeline.py` 同步改为通过 `get_stereo_calibration()` 构造 K，不再在 pipeline 层触达 RealSense SDK 细节。
+## 6. 标定与相机信息缓存
 
-#### 8.4.2 Quest 标定职责下沉与 API 统一
+### 6.1 Quest camera_info 字段
 
-- 在 `src/modules/quest_stereo.py` 新增 `QuestStereoCalibration` 与 `QuestStereoCamera.get_stereo_calibration(calib_dir)`，含目录级缓存。
-- `src/pipeline/quest_pipeline.py` 已删除本地 `_load_calibration`，统一改为调用相机模块提供的标定接口。
-- 模块导出已更新，`src/modules/__init__.py` 可直接导入 `QuestStereoCalibration`。
+`QuestCameraInfoMsg` 当前包含：
 
-#### 8.4.3 Pipeline 命名收敛
+- `is_supported`。
+- 左右目 `fx/fy/cx/cy`。
+- 左右畸变数组（Quest 当前通常为空）。
+- `baseline_m`。
+- `sensor_width/sensor_height`。
+- `active_left/top/right/bottom`。
+- 左右 `RequestedResolution`。
+- `current_width/current_height`。
+- `max_framerate`。
+- 左右 `LensOffset` 的 position 与 quaternion。
+- `sender_mono_ms`。
 
-- `realsense_pipeline.py` 与 `quest_pipeline.py` 中统计函数名由 `_maybe_log_stats` 统一改为 `_log_stats_if_due`，语义更明确。
+### 6.2 Python 标定构造方式
 
-#### 8.4.4 Quest Pipeline FFS 参数与新版模块对齐
+- 网络方式：`QuestStereoCalibration.from_camera_info_msg()`。
+- 本地旧标定方式：`QuestStereoCalibration.from_local_json()`。
+- Pipeline 统一通过 `QuestReceiver.get_calibration()` 获取网络标定。
 
-- `src/pipeline/quest_pipeline.py` 的 FFS 默认权重切到 `20-30-48`。
-- 新增并透传以下参数到 `FastFoundationStereoRealtime`：
-  - `--ffs_seed`
-  - `--ffs_cudnn_benchmark`
-  - `--ffs_use_trt`
-  - `--ffs_trt_precision`
-  - `--ffs_trt_strict`
-  - `--ffs_trt_tag`
-  - `--ffs_trt_platform_tag`
-  - `--ffs_trt_feature_engine_path`
-  - `--ffs_trt_post_engine_path`
+### 6.3 缓存策略
 
-#### 8.4.5 FFS 速度差异排查结论（重要）
+`pose_server.py` 每次发现新的 camera_info digest 后：
 
-- 对 `20-30-48 + valid_iters=4` 的慢速现象进行了专项排查。
-- 关键结论：
-  - 当前业务脚本显示的 `infer_ms` 为总耗时（prep+forward+post），不是纯 forward；
-  - 文档表格是特定 profiling 条件下的基准值，不能直接与业务全链路 HUD 值等价比较；
-  - 在当前本机环境使用官方 `scripts/profile_speed.py` 复测，同配置平均约 `39.1ms`（warmup 后），与业务实测量级一致。
+1. 将消息转为 JSON dict。
+2. 写入 `Calibration/cache/camera_info_latest.json`。
+3. 若与旧 latest 核心内容不同，先把旧文件备份为 `camera_info_<timestamp>.json`。
+4. 若内容不变，仅更新 `_received_at`。
 
-### 8.6 今日工作总结（2026-04-24 补充）
+Pipeline 启动策略：
 
-本次补充主要围绕「修复双 Topic drain bug + 完善消息字段 + 新增编解码器 + 模块重命名」。
+- `camera_source=network` + `preload_camera_cache=1`（默认）：
+  - 启动时先读取 `Calibration/cache/camera_info_latest.json`。
+  - 若缓存存在，则立即初始化 K 与 FoundationPoseEstimator。
+  - 此时只要收到 `quest_stereo` 就可以开始估计 pose，不必阻塞等待本次会话的 `quest_camera_info`。
+  - 后续收到网络 `quest_camera_info` 后，会与当前标定签名比较；若不同且 `network_calib_update=1`，则刷新 K/PoseEstimator 并重置跟踪状态。
+- `camera_source=network` + `preload_camera_cache=0`：严格等待网络 `quest_camera_info` 后再初始化。
+- `camera_source=local`：优先读缓存 latest，再回退旧 `Calibration/20260322_070544` 目录；若失败，再等待网络。
 
-#### 8.6.1 修复 PayloadReceiver 跨 Topic Drain Bug
+### 6.4 K 映射策略
 
-- Python PayloadReceiver 新增 `recv_all_latest_by_topic` 方法：按 topic 分别 drain，返回每个 topic 的最新 payload 字典。
-- 原 `recv_frame_latest` 不区分 topic drain，标记为单 topic 场景专用。
-- C# PayloadReceiver 的 ReceiveLoop 修复：drain 时将每条消息按 topic 分别存入 `_latestByTopic`，而非只保留最后一条。
-- 根因：多 topic 场景下，`recv_frame_latest` 的跨 topic drain 会丢弃非最后 topic 的消息，导致 stereo 帧无法正常接收。
+Quest 标定可能来自 sensor/active array 分辨率，而算法处理分辨率通常为 640x480。
 
-#### 8.6.2 QuestCameraInfoMsg 字段补充
+当前 `QuestStereoCalibration.scaled_k()` 支持：
 
-- Python/C# 两侧新增字段：
-  - `is_supported`（bool）：PassthroughCameraAccess.IsSupported。
-  - `left_requested_width/height`、`right_requested_width/height`（int）：RequestedResolution。
-- C# QuestCameraInfoEncoder 的 BuildMessage 和 ComputeDigest 同步更新。
+- `calib_assume_center_crop=1`：中心裁剪 + 缩放映射（默认）。
+- `calib_assume_center_crop=0`：仅线性缩放。
 
-#### 8.6.3 新增编解码器
+注意：`quest_pipeline._preprocess_stereo_pair()` 只缩放实际接收图像，不会把 640x480 图像扩回 active array 再二次裁剪。
 
-- Python CameraInfoEncoder：src/zmq_utils/payload/encoder/camera_info_encoder.py
-- C# CameraInfoDecoder：Assets/Scripts/Net/Payload/Decoder/CameraInfoDecoder.cs
-  - 继承 BaseDecoder，触发 OnCameraInfoReceived 事件。
+## 7. 深度与 TensorRT 口径
 
-#### 8.6.4 quest_receiver.py → quest_io.py 重命名
+### 7.1 Fast-FoundationStereo 后端
 
-- 文件重命名为 quest_io.py，类名 QuestReceiver 保持不变。
-- poll_all 方法改用 `recv_all_latest_by_topic` 替代 `recv_frame_latest`，修复双 topic 消息丢失问题。
-- modules/__init__.py 导出路径同步更新。
+`FastFoundationStereoRealtime` 当前结构：
 
-## 9. 后续 AI 接手建议
+- `_PyTorchStereoBackend`：加载 `.pth` 并执行 PyTorch 推理。
+- `_TrtStereoBackend`：按输入尺寸、迭代次数、最大视差和平台标签匹配 TRT engine。
+- `FastFoundationStereoRealtime.predict_depth()`：统一入口，输出米制深度图。
 
-建议按以下顺序开始：
+### 7.2 TRT/ONNX 命名规则
 
-1. 先确认链路可运行，再做调参。
-2. 用 stage 2/3/4 逐段定位问题，不要一上来全链路盲调。
-3. 先用固定基线场景验证：
-   - 掩码质量
-   - 深度有效率
-   - 位姿稳定性
-4. 任何协议或显示字段变更，都同步更新本文件第 5 节。
-5. 若改动网络协议，必须 Python 与 Unity 同步改，避免单边兼容逻辑回流。
-6. 若需要重建 pixi 环境，先确认无 Python LSP/formatter 进程占用 `.pixi/envs/default`。
-7. Quest 链路测试前，确认 Unity 场景中 PayloadSender 的 SenderEntry 列表已配置 quest_stereo 和 quest_camera_info 两个 topic。
-8. camera_source=local 时确认 --calib_dir 或 --camera_cache_dir 指向有效目录。
-9. 新增 topic 时，Python 侧 PayloadReceiver 的 topics 参数、QuestReceiver 的 topics 列表、以及 Unity 侧 SenderEntry/ReceiverEntry 需同步更新。
-10. ONNX 导出回归建议固定检查两项：
-    - `feature_runner.onnx` 是否生成
-    - `post_runner.onnx` 是否生成
-11. TRT 构建回归建议固定检查四项：
-    - engine 文件是否带完整 tag（含 size/iters/max_disp）
-    - 文件名是否包含平台标识（win/linux）
-    - 文件名是否包含精度标识（fp16/fp32）
-    - 运行时是否仅依赖新命名（无 legacy fallback）
+当前使用参数化 tag，不再生成/回退 legacy 名称。
 
-## 10. 文档维护规则
+- tag：`h{height}-w{width}-it{valid_iters}-md{max_disp}`。
+- ONNX：`feature_runner-{tag}.onnx`、`post_runner-{tag}.onnx`。
+- Engine：`feature_runner-{tag}.{platform}.{precision}.engine`、`post_runner-{tag}.{platform}.{precision}.engine`。
 
-- 仅维护本文件，避免再次产生多份历史交接文档。
-- 每次完成较大改动后，只需更新：
-  - 第 5 节（统计/调试口径）
-  - 第 8 节（当日总结）
-  - 第 9 节（下一步建议）
+运行时匹配顺序：
+
+1. 显式传入的 engine path。
+2. `{runner}-{tag}.{platform}.{precision}.engine`。
+3. `{runner}-{tag}.{platform}.engine`。
+4. `{runner}-{tag}.engine`。
+
+### 7.3 TRT 配置口径
+
+- 不再依赖 `onnx.yaml`。
+- 运行时直接由参数构造 `OmegaConf`。
+- `trt_strict=1` 时 TRT 不可用直接报错。
+- `trt_strict=0` 时缺 engine 或初始化失败会回退 PyTorch。
+
+### 7.4 FFS 耗时字段
+
+`predict_depth(return_timing=True)` 返回：
+
+- `prep_ms`：numpy → tensor、缩放、维度转换等预处理。
+- `forward_ms`：模型/engine 前向推理。
+- `post_ms`：回 CPU、视差转深度、恢复尺寸等后处理。
+- `infer_ms`：`prep + forward + post` 总耗时。
+
+因此业务 HUD/日志中的 `infer_ms` 或 pipeline `depth_ms` 不是纯 forward 时间，不能直接与官方 profile 表格等价比较。
+
+## 8. 位姿回传与 Unity 应用口径
+
+### 8.1 PoseMsg 字段
+
+Python `PoseEncoder` 输出 MessagePack 字段：
+
+- `timestamp_ms`
+- `frame_id`
+- `stage`
+- `phase`
+- `det_count`
+- `depth_valid_ratio`
+- `fps`
+- `has_pose`
+- `pose_matrix_flat`（4x4 行优先展平，16 个数）
+- `yolo_ms/depth_ms/cutie_ms/pose_ms`
+
+无有效位姿时：
+
+- `has_pose=false`
+- `pose_matrix_flat=null`
+- 若 `send_when_no_pose=1`，Python 仍会发送状态包，Unity `PoseDecoder` 会忽略无 pose 包。
+
+### 8.2 坐标转换
+
+Python FoundationPose 输出是 OpenCV 相机坐标口径：
+
+- x 向右。
+- y 向下。
+- z 向前。
+
+Unity `PoseDecoder` 默认 `convertFromOpenCvCamera=true`，会转换为 Unity 常用口径：
+
+- x 向右。
+- y 向上。
+- z 向前。
+
+### 8.3 按发送帧对齐 Unity 世界位姿
+
+当前 Unity 不再简单把 Python 返回 pose 直接设置到物体，而是：
+
+1. `QuestStereoEncoder` 每次编码 stereo 成功后递增 `frame_id` 并触发 `OnFrameEncoded(frame_id)`。
+2. `PoseFollow.HandleFrameEncoded(frame_id)` 缓存该发送帧时 `sourceTarget` 的世界位姿。
+3. Python 回包带回同一个 `frame_id`。
+4. `PoseFollow.FollowTarget(pose, frame_id)` 查找对应发送帧的 `sourceTargetPose`。
+5. 将相机/参考系下的局部 pose 转换到 Unity 世界坐标。
+6. `Update()` 每帧应用最新目标 pose，可选经过 `PoseSmoother` 平滑。
+
+如果 Unity 日志出现“未命中发送帧缓存”：
+
+- 检查 `QuestStereoEncoder.OnFrameEncoded` 是否绑定或被 `PoseFollow` 自动找到。
+- 检查 `sourceTarget` 是否为空。
+- 检查 `sourceTargetCacheSize` 是否太小。
+- 检查 Python 回包 `frame_id` 是否被正确传递。
+
+## 9. 调试与统计口径
+
+### 9.1 Pipeline HUD
+
+Quest/RealSense Pipeline HUD 显示：
+
+- `fps`：实时 EMA FPS。
+- `stage` 与 `phase`。
+- `det`。
+- `depth_valid`。
+- `yolo/depth/cutie/pose` 分阶段耗时。
+
+HUD 文本会根据窗口宽度换行，避免长文本溢出。
+
+### 9.2 Pipeline stats 日志
+
+Pipeline 统计日志包含：
+
+- `rt_fps`：基于相邻输出帧间隔计算并 EMA 平滑。
+- `window_fps`：按 `stats_interval` 统计窗口计算。
+- `avg(yolo/depth/cutie/pose)`。
+- `depth_valid`。
+
+Quest 额外包含：
+
+- `recv`
+- `decode_fail`
+- `sender_fps`
+- `sender_est`
+- `sender_raw`
+- `sender_gap`
+
+注意：`sender_raw` 是跨进程/跨设备单调时钟差，不能直接解释为真实网络延迟；优先看 `sender_est` 与趋势。
+
+### 9.3 pose_server 延迟日志
+
+`pose_server.py` 额外统计：
+
+- `quest_rx->unity_tx`：从 Quest 帧接收时间戳到 Python 发出 pose 的估计总耗时。
+- `run`：一次 pipeline.run 总耗时。
+- `wait`：粗略等待/取帧耗时。
+- `proc`：算法耗时合计。
+- `send`：ZMQ 发送耗时。
+- `pose_ratio`：输出有效 pose 的比例。
+- `drop`：pose 发布失败比例。
+
+## 10. 环境与依赖口径
+
+### 10.1 Python 环境
+
+项目使用 pixi 管理，核心文件：`Foundationpose_for_VR/pixi.toml`。
+
+当前依赖特点：
+
+- Python 3.12。
+- CUDA 12.8。
+- PyTorch 2.7.x cu128。
+- TensorRT cu12。
+- pyrealsense2。
+- ultralytics/YOLOE。
+- msgpack、onnx、pillow。
+- Cutie 以本地 editable path 引入。
+
+### 10.2 Windows 注意事项
+
+若重建 `.pixi/envs/default` 失败：
+
+- 先确认 VS Code Python LSP、Black Formatter、残留 Python 进程没有占用环境文件。
+- 关闭相关进程后再重建。
+
+### 10.3 FoundationPose C++ 扩展
+
+`pixi run build` 中 `_build-fp` 会构建 `FoundationPose/mycpp`。
+
+若 FoundationPose 导入报 C++ 扩展缺失，应先检查该构建是否成功。
+
+## 11. 已清理/不要恢复的旧内容
+
+不要恢复以下旧入口或旧协议路径：
+
+- `src/pose_tracker_api.py`
+- `src/vpt_cli.py`
+- `src/VOT.py`
+- `src/zmq_utils/timing.py`
+- `src/zmq_utils/latency.py`
+- `src/modules/quest_stereo.py`
+- `src/modules/quest_receiver.py`
+- `src/quest_stereo_pose_pipeline.py`
+- Unity 旧 `StaticStereoEncoder.cs`
+- ZMQ PUSH/PULL 模式
+- Python `PayloadSender` 的 default topic
+- 旧 packed_image_jpeg_legacy 单图协议
+- Pose JSON 传输路径
+- TRT legacy alias / legacy fallback 文件名
+- `onnx.yaml` 运行时依赖
+
+## 12. 最近核对后修正的重点
+
+本次重新阅读代码后，确认并修正以下陈旧点：
+
+1. Quest 接收模块当前是 `quest_io.py`，不是 `quest_stereo.py` 或 `quest_receiver.py`。
+2. Quest 主服务入口应优先使用 `src/pose_server.py`。
+3. `pixi.toml` 中 `demo-pipeline` 已修正为 `src/pipeline/quest_pipeline.py`。
+4. Unity 已有 `PoseFollow + PoseSmoother` 的回包位姿应用链路，文档已补充该口径。
+5. 多 topic drain bug 已在 Python 与 Unity 两侧通过“按 topic 缓存最新帧”修复。
+6. Quest Pipeline 当前默认 FFS 权重路径在代码中是 `23-36-37/model_best_bp2_serialize.pth`；RealSense Pipeline 默认是 `20-30-48/model_best_bp2_serialize.pth`。
+7. 项目代码中若干仍偏英文或过短的注释/文档字符串已补充为更详细中文说明。
+
+## 13. 后续 AI 接手建议
+
+建议按以下顺序接手：
+
+1. 先确认 `Calibration/cache/camera_info_latest.json` 已有一次有效缓存；有缓存时 `pose_server.py` 默认会先初始化 FoundationPose，后续收到 stereo 即可估计。
+2. 再跑 `pose_server.py`，确认 Unity → Python 的 `quest_stereo` 能收到；`quest_camera_info` 仍应持续发送，用于校验/刷新缓存。
+3. 若想严格验证网络 camera_info，可加 `--preload_camera_cache 0` 强制等待本次会话的网络标定。
+4. 用 stage 1/2/3/4 逐段定位，不要直接在 stage 4 盲调。
+4. stage 2 优先看 mask 是否稳定、目标 prompt 是否正确。
+5. stage 3 优先看 depth_valid 和深度范围，不要先调 FoundationPose。
+6. stage 4 再看 register 是否成功、track 是否稳定。
+7. 若 Unity 中物体位置明显错位，优先检查：
+   - `PoseDecoder.convertFromOpenCvCamera`
+   - `PoseFollow.sourceTarget`
+   - `frame_id` 缓存命中
+   - Quest K 映射方式
+8. 若 stereo 收不到但 camera_info 能收到，优先检查：
+   - Unity `PayloadSender` 是否有 `quest_stereo` Entry
+   - `QuestStereoEncoder` 左右相机是否 `IsPlaying`
+   - `recv_hwm` 是否太小
+9. 若 camera_info 收不到，优先检查：
+   - Unity `quest_camera_info` topic 是否配置
+   - `QuestCameraInfoEncoder` 左右相机引用是否有效
+10. 若 TRT 不生效，先确认 engine 文件名是否带完整 tag、平台和精度标签。
+11. 若协议字段变更，必须同步修改：
+    - Python message/encoder/decoder
+    - Unity Msg/Encoder/Decoder
+    - 本文档第 5、6、8 节
+
+## 14. 文档维护规则
+
+- 只维护本文件作为长期交接入口。
+- 每次完成较大改动后，至少更新：
+  - 第 2 节：入口是否变化。
+  - 第 4 节：模块职责是否变化。
+  - 第 5/6/8/9 节：协议、标定、位姿和统计口径是否变化。
+  - 第 12 节：最近修正重点。
+  - 第 13 节：下一步接手建议。

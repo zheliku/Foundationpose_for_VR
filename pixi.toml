@@ -155,5 +155,5 @@ python src/pipeline/realsense_pipeline.py \
 """ }
 
 demo-pipeline = { cmd = """
-python src/quest_stereo_pose_pipeline.py
+python src/pipeline/quest_pipeline.py
 """ }
