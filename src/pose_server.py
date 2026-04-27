@@ -147,19 +147,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--local_debug",
         type=int,
         default=1,
-        help="是否开启本地 OpenCV 调试窗口。",
-    )
-    parser.add_argument(
-        "--show_depth_window",
-        type=int,
-        default=1,
-        help="local_debug=1 时是否显示深度窗口。",
-    )
-    parser.add_argument(
-        "--show_stereo_window",
-        type=int,
-        default=1,
-        help="local_debug=1 时是否显示双目窗口。",
+        help="是否开启本地 OpenCV 调试 dashboard。",
     )
     parser.add_argument(
         "--latency_ema_alpha",
@@ -251,8 +239,6 @@ def run_pose_server(args: argparse.Namespace) -> None:
     log_interval = max(int(args.pub_log_interval), 1)
     send_when_no_pose = bool(int(args.send_when_no_pose))
     local_debug = bool(int(args.local_debug))
-    show_depth_window = bool(int(args.show_depth_window))
-    show_stereo_window = bool(int(args.show_stereo_window))
     enable_keyboard_control = bool(int(args.enable_keyboard_control))
     latency_alpha = float(np.clip(args.latency_ema_alpha, 0.01, 1.0))
     reset_interval_sec = max(float(args.reset_interval_sec), 0.0)
@@ -290,10 +276,10 @@ def run_pose_server(args: argparse.Namespace) -> None:
 
     if local_debug:
         cv2.namedWindow("PoseServer Debug", cv2.WINDOW_AUTOSIZE)
-        if show_depth_window:
-            cv2.namedWindow("PoseServer Depth", cv2.WINDOW_AUTOSIZE)
-        if show_stereo_window:
-            cv2.namedWindow("PoseServer Stereo", cv2.WINDOW_AUTOSIZE)
+        cv2.namedWindow("PoseServer Stereo", cv2.WINDOW_AUTOSIZE)
+        cv2.setWindowProperty(
+            "PoseServer Debug", cv2.WND_PROP_TOPMOST, 1
+        )
 
     # 窗口占位图：等待首帧期间避免 OpenCV 窗口假死。
     # 若已用本地 camera_info 缓存完成预初始化，则只需要等待 stereo 图像即可开始估计。
@@ -336,6 +322,9 @@ def run_pose_server(args: argparse.Namespace) -> None:
                 # 关键：无数据时也要刷窗口事件，否则 OpenCV 窗口会被系统判为“未响应”。
                 if local_debug:
                     cv2.imshow("PoseServer Debug", waiting_placeholder)
+                    cv2.setWindowProperty(
+                        "PoseServer Debug", cv2.WND_PROP_TOPMOST, 1
+                    )
                     key = cv2.waitKey(1) & 0xFF
                     if key in (27, ord("q")):
                         break
@@ -436,22 +425,23 @@ def run_pose_server(args: argparse.Namespace) -> None:
 
             # 本地调试显示与键盘交互。
             if local_debug and output.debug is not None:
-                debug_vis = output.debug.vis_bgr.copy()
+                debug_vis = output.debug.dashboard_bgr.copy()
                 _draw_text_block(
                     debug_vis,
                     [
-                        f"total(ms) quest_rx->unity_tx={e2e_ms_ema:.1f}",
-                        f"split(ms) run={run_ms_ema:.1f} wait={wait_ms_ema:.1f} proc={proc_ms_ema:.1f} send={send_ms_ema:.2f}",
-                        f"queue topic={topic} sent={sent_count} drop={dropped_count} reset={reset_count}",
+                        f"e2e={e2e_ms_ema:.0f}ms run={run_ms_ema:.0f}ms proc={proc_ms_ema:.0f}ms send={send_ms_ema:.1f}ms",
+                        f"sent={sent_count} drop={dropped_count} reset={reset_count}",
                     ],
                     anchor="bottom-left",
                 )
                 cv2.imshow("PoseServer Debug", debug_vis)
-
-                if show_depth_window:
-                    cv2.imshow("PoseServer Depth", output.debug.depth_vis_bgr)
-                if show_stereo_window:
-                    cv2.imshow("PoseServer Stereo", output.debug.stereo_vis_bgr)
+                cv2.imshow("PoseServer Stereo", output.debug.stereo_bgr)
+                cv2.setWindowProperty(
+                    "PoseServer Debug", cv2.WND_PROP_TOPMOST, 1
+                )
+                cv2.setWindowProperty(
+                    "PoseServer Stereo", cv2.WND_PROP_TOPMOST, 0
+                )
 
                 key = cv2.waitKey(1) & 0xFF
                 if key in (27, ord("q")):

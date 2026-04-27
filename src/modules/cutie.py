@@ -111,8 +111,8 @@ class CutieTracker(Tracker2D):
         self.processor.max_internal_size = -1
 
     @staticmethod
-    def _ensure_bgr(frame: np.ndarray) -> np.ndarray:
-        """统一输入图像为 3 通道格式。"""
+    def _ensure_rgb(frame: np.ndarray) -> np.ndarray:
+        """统一输入图像为 RGB 3 通道格式。"""
         if frame.ndim == 2:
             frame = np.repeat(frame[..., None], 3, axis=2)
         elif frame.ndim == 3:
@@ -166,7 +166,7 @@ class CutieTracker(Tracker2D):
         - init_mask 与 init_bbox 至少提供一个。
         - 若两者都提供，优先使用 init_mask。
         """
-        frame = self._ensure_bgr(frame)
+        frame = self._ensure_rgb(frame)
 
         if init_mask is None and init_bbox is None:
             raise ValueError("initialize 需要 init_mask 或 init_bbox 至少一个。")
@@ -205,7 +205,7 @@ class CutieTracker(Tracker2D):
         - bbox_xywh: 跟踪框。
         - mask: 当前目标 mask。
         """
-        frame = self._ensure_bgr(frame)
+        frame = self._ensure_rgb(frame)
 
         with torch.no_grad():
             frame_t = to_tensor(frame).to(self.device).float()
@@ -216,6 +216,13 @@ class CutieTracker(Tracker2D):
         bbox_xywh = self._bbox_from_mask(out_mask)
         torch.cuda.empty_cache()
         return CutieTrackResult(bbox_xywh=bbox_xywh, mask=out_mask)
+
+    def reset(self) -> None:
+        """清理 Cutie 时序 memory，避免重新 register 后旧目标状态污染新跟踪。"""
+        from cutie.inference.inference_core import InferenceCore
+
+        self.processor = InferenceCore(self.model, cfg=self.model.cfg)
+        self.processor.max_internal_size = -1
 
 
 if __name__ == "__main__":

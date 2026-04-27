@@ -349,6 +349,11 @@ class FoundationPoseEstimator:
     def reset(self) -> None:
         """重置内部状态，使下次调用重新走 register。"""
         self._initialized = False
+        if hasattr(self.estimator, "pose_last"):
+            try:
+                delattr(self.estimator, "pose_last")
+            except Exception:
+                self.estimator.pose_last = None
 
 
 if __name__ == "__main__":

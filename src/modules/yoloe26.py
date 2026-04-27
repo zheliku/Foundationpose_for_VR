@@ -54,6 +54,12 @@ class Yoloe26Result:
     # 当前生效的提示词。
     prompt: list[str]
 
+    # 被选中用于下游 FoundationPose 的 mask 下标；无检测时为 -1。
+    selected_index: int = -1
+
+    # 被选中 mask 的面积占整幅图比例。
+    mask_area_ratio: float = 0.0
+
 
 class Yoloe26Masker:
     """YOLOE-26 实时掩码生成器。"""
@@ -231,7 +237,10 @@ class Yoloe26Masker:
         if result.boxes is not None and result.boxes.data is not None:
             det_count = int(len(result.boxes.data))
 
-        # 构建黑白掩码。
+        selected_index = -1
+
+        # 构建黑白掩码。注意：下游 FoundationPose 需要的是单个目标 mask，
+        # 不能把多个检测直接 union，否则误检会污染初始注册。
         if (
             result.masks is None
             or result.masks.data is None
@@ -246,7 +255,33 @@ class Yoloe26Masker:
             else:
                 masks = np.asarray(masks_data)
             binary_masks = (masks >= float(self.mask_threshold)).astype(np.uint8) * 255
-            mask_bw = np.max(binary_masks, axis=0)
+
+            scores = np.ones((binary_masks.shape[0],), dtype=np.float32)
+            if result.boxes is not None and getattr(result.boxes, "conf", None) is not None:
+                conf = result.boxes.conf
+                if hasattr(conf, "detach"):
+                    scores = conf.detach().cpu().numpy().astype(np.float32)
+                else:
+                    scores = np.asarray(conf, dtype=np.float32)
+
+            areas = binary_masks.reshape(binary_masks.shape[0], -1).sum(axis=1)
+            valid = areas > 0
+            if np.any(valid):
+                score = scores[: binary_masks.shape[0]].copy()
+                score[~valid] = -1.0
+                selected_index = int(np.argmax(score))
+                mask_bw = binary_masks[selected_index]
+            else:
+                mask_bw = np.zeros(frame.shape[:2], dtype=np.uint8)
+
+        if mask_bw.shape[:2] != frame.shape[:2]:
+            mask_bw = cv2.resize(
+                mask_bw,
+                (frame.shape[1], frame.shape[0]),
+                interpolation=cv2.INTER_NEAREST,
+            )
+
+        mask_area_ratio = float(np.count_nonzero(mask_bw)) / float(mask_bw.size)
 
         return Yoloe26Result(
             overlay=overlay,
@@ -254,6 +289,8 @@ class Yoloe26Masker:
             det_count=det_count,
             infer_ms=infer_ms,
             prompt=list(self._prompt),
+            selected_index=selected_index,
+            mask_area_ratio=mask_area_ratio,
         )
 
 

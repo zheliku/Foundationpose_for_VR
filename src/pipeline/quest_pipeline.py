@@ -53,10 +53,20 @@ class PipelineStepTiming:
 class PipelineDebugData:
     """调试可视化数据，供 main 示例使用。"""
 
-    vis_bgr: np.ndarray
-    mask_bw: np.ndarray
-    depth_vis_bgr: np.ndarray
-    stereo_vis_bgr: np.ndarray
+    dashboard_bgr: np.ndarray
+    stereo_bgr: np.ndarray
+
+
+@dataclass
+class FrameDiagnostics:
+    """单帧几何/对齐诊断数据。"""
+
+    mask_area_ratio: float = 0.0
+    depth_valid_in_mask: float = 0.0
+    depth_median_in_mask: float = 0.0
+    depth_iqr_in_mask: float = 0.0
+    yolo_selected_index: int = -1
+    cutie_adjust_applied: bool = False
 
 
 @dataclass
@@ -151,6 +161,46 @@ def _colorize_depth(
     return vis
 
 
+def _overlay_mask_contour(
+    image_bgr: np.ndarray,
+    mask_bw: np.ndarray,
+    color: tuple[int, int, int] = (0, 255, 255),
+) -> np.ndarray:
+    """在图像上叠加真实传入下游的 mask 半透明区域与轮廓。"""
+    vis = image_bgr.copy()
+    if mask_bw is None or mask_bw.size == 0:
+        return vis
+
+    mask = (mask_bw > 0).astype(np.uint8)
+    if mask.shape[:2] != vis.shape[:2]:
+        mask = cv2.resize(
+            mask,
+            (vis.shape[1], vis.shape[0]),
+            interpolation=cv2.INTER_NEAREST,
+        )
+
+    color_img = np.zeros_like(vis)
+    color_img[mask > 0] = color
+    cv2.addWeighted(color_img, 0.35, vis, 1.0, 0.0, vis)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(vis, contours, -1, color, 2)
+    return vis
+
+
+def _tile_debug_dashboard(
+    pose_bgr: np.ndarray,
+    depth_bgr: np.ndarray,
+) -> np.ndarray:
+    """合并主调试视图：pose / depth+mask。"""
+    h, w = pose_bgr.shape[:2]
+
+    depth_panel = cv2.resize(depth_bgr, (w, h), interpolation=cv2.INTER_AREA)
+
+    _draw_hud(pose_bgr, "POSE", x=8, y=22)
+    _draw_hud(depth_panel, "DEPTH+MASK", x=8, y=22)
+    return np.hstack((pose_bgr, depth_panel))
+
+
 def _generate_cube_symmetry_tfs() -> np.ndarray:
     """生成立方体旋转对称群（24 个），用于 FoundationPose 对称约束。"""
     import itertools
@@ -223,6 +273,8 @@ class QuestStereoPosePipeline:
     _cutie_initialized: bool = False
     _last_processed_frame_id: int | None = None
     _calib_initialized: bool = False  # 标定是否已初始化。
+    _last_pose_4x4: np.ndarray | None = None
+    _track_reject_count: int = 0
 
     # 性能统计累加器。
     _frame_count: int = 0
@@ -386,8 +438,12 @@ class QuestStereoPosePipeline:
         self._started = True
         self._has_pose = False
         self._cutie_initialized = False
+        self._last_pose_4x4 = None
+        self._track_reject_count = 0
         if self.pose_estimator is not None:
             self.pose_estimator.reset()
+        if self.cutie_tracker is not None and hasattr(self.cutie_tracker, "reset"):
+            self.cutie_tracker.reset()
         self._frame_count = 0
         self._start_t = time.perf_counter()
         self._stats_t = self._start_t
@@ -418,8 +474,12 @@ class QuestStereoPosePipeline:
         """仅重置位姿跟踪状态，不重启接收器。"""
         self._has_pose = False
         self._cutie_initialized = False
+        self._last_pose_4x4 = None
+        self._track_reject_count = 0
         if self.pose_estimator is not None:
             self.pose_estimator.reset()
+        if self.cutie_tracker is not None and hasattr(self.cutie_tracker, "reset"):
+            self.cutie_tracker.reset()
 
     def _log_stats_if_due(self, output: PosePipelineOutput) -> None:
         """按固定间隔打印统计信息，便于线上观察性能。"""
@@ -492,6 +552,11 @@ class QuestStereoPosePipeline:
         right_bgr = _to_bgr(right)
 
         if left_bgr.shape[:2] != right_bgr.shape[:2]:
+            logging.warning(
+                "[QuestInput] 左右图尺寸不同 left=%s right=%s，将缩放到公共尺寸；这可能破坏双目几何。",
+                left_bgr.shape[:2],
+                right_bgr.shape[:2],
+            )
             out_h = min(left_bgr.shape[0], right_bgr.shape[0])
             out_w = min(left_bgr.shape[1], right_bgr.shape[1])
             left_bgr = cv2.resize(
@@ -519,6 +584,119 @@ class QuestStereoPosePipeline:
                 )
 
         return left_bgr, right_bgr
+
+    def _compute_frame_diagnostics(
+        self,
+        mask_bw: np.ndarray,
+        depth_m: np.ndarray,
+        yolo_selected_index: int = -1,
+    ) -> FrameDiagnostics:
+        """计算 mask/depth 对齐相关诊断指标。"""
+        diag = FrameDiagnostics(yolo_selected_index=int(yolo_selected_index))
+        if mask_bw is None or mask_bw.size == 0:
+            return diag
+
+        mask = mask_bw > 0
+        diag.mask_area_ratio = float(mask.mean())
+        if not np.any(mask) or depth_m is None or depth_m.size == 0:
+            return diag
+
+        depth = np.asarray(depth_m, dtype=np.float32)
+        if depth.shape[:2] != mask.shape[:2]:
+            return diag
+
+        values = depth[mask]
+        valid = values[np.isfinite(values) & (values > 0.0)]
+        diag.depth_valid_in_mask = float(valid.size) / float(max(values.size, 1))
+        if valid.size > 0:
+            q25, q50, q75 = np.percentile(valid, [25, 50, 75])
+            diag.depth_median_in_mask = float(q50)
+            diag.depth_iqr_in_mask = float(q75 - q25)
+        return diag
+
+    def _is_pose_valid(self, pose_4x4: np.ndarray | None) -> bool:
+        """基础 pose 合法性过滤，避免 NaN/越界深度进入持续跟踪。"""
+        if pose_4x4 is None:
+            return False
+        pose = np.asarray(pose_4x4)
+        if pose.shape != (4, 4) or not np.isfinite(pose).all():
+            return False
+        z = float(pose[2, 3])
+        return self.min_depth <= z <= self.max_depth
+
+    def _is_track_jump(self, pose_4x4: np.ndarray) -> bool:
+        """过滤 FoundationPose track 的明显跳变输出。"""
+        if self._last_pose_4x4 is None:
+            return False
+
+        trans_delta = float(
+            np.linalg.norm(pose_4x4[:3, 3] - self._last_pose_4x4[:3, 3])
+        )
+        rel = pose_4x4[:3, :3] @ self._last_pose_4x4[:3, :3].T
+        rot_delta = float(
+            np.degrees(
+                np.arccos(np.clip((float(np.trace(rel)) - 1.0) * 0.5, -1.0, 1.0))
+            )
+        )
+        return (
+            trans_delta > float(self.args.pose_jump_translation_m)
+            or rot_delta > float(self.args.pose_jump_rotation_deg)
+        )
+
+    def _try_recover_by_register(
+        self,
+        left_rgb: np.ndarray,
+        depth_m: np.ndarray,
+        mask_bw: np.ndarray,
+        diag: FrameDiagnostics,
+        timing: PipelineStepTiming,
+    ) -> np.ndarray | None:
+        """用当前稳定 2D mask 重新 register，作为快速运动导致 track 丢失后的恢复路径。"""
+        if self.pose_estimator is None:
+            return None
+        if not bool(self.args.re_register_on_track_lost):
+            return None
+        if diag.depth_valid_in_mask < float(self.args.register_min_depth_valid_in_mask):
+            return None
+        if np.count_nonzero(mask_bw) <= 0:
+            return None
+
+        t0 = time.perf_counter()
+        try:
+            self.pose_estimator.reset()
+            pose_4x4 = self.pose_estimator.register(
+                rgb=left_rgb,
+                depth=depth_m.astype(np.float64),
+                mask=mask_bw,
+            )
+            pose_4x4 = np.asarray(pose_4x4, dtype=np.float64).reshape(4, 4)
+        except Exception as exc:
+            logging.warning("[FoundationPose] re-register 失败: %s", exc)
+            self.pose_estimator.reset()
+            return None
+        finally:
+            timing.pose_ms += (time.perf_counter() - t0) * 1000.0
+
+        if not self._is_pose_valid(pose_4x4):
+            logging.warning("[FoundationPose] re-register 输出非法或 z 越界。")
+            self.pose_estimator.reset()
+            return None
+
+        self._has_pose = True
+        self._track_reject_count = 0
+        self._last_pose_4x4 = pose_4x4.copy()
+
+        if self.cutie_tracker is not None:
+            ct0 = time.perf_counter()
+            try:
+                _ = self.cutie_tracker.initialize(left_rgb, init_mask=mask_bw)
+                self._cutie_initialized = True
+            except Exception as exc:
+                self._cutie_initialized = False
+                logging.warning("[cutie] re-register 后初始化失败: %s", exc)
+            timing.cutie_ms += (time.perf_counter() - ct0) * 1000.0
+
+        return pose_4x4
 
 
     def run(self, return_debug: bool = False) -> PosePipelineOutput | None:
@@ -562,6 +740,7 @@ class QuestStereoPosePipeline:
             target_width=self.frame_w,
             target_height=self.frame_h,
         )
+        left_rgb = cv2.cvtColor(left_bgr, cv2.COLOR_BGR2RGB)
 
         stereo_timestamp_ms = float(stereo.timestamp_ms)
 
@@ -579,6 +758,7 @@ class QuestStereoPosePipeline:
         mask_bw = np.zeros(left_bgr.shape[:2], dtype=np.uint8)
         depth_m = np.zeros(left_bgr.shape[:2], dtype=np.float32)
         vis_bgr = left_bgr.copy()
+        diag = FrameDiagnostics()
 
         # 阶段2：YOLO 分割。
         if self.stage >= 2:
@@ -589,6 +769,19 @@ class QuestStereoPosePipeline:
 
             det_count = yolo_result.det_count
             mask_bw = yolo_result.mask_bw
+            if mask_bw.shape[:2] != left_bgr.shape[:2]:
+                logging.warning(
+                    "[YOLOE] mask 尺寸与图像不一致 mask=%s image=%s，已按最近邻缩放。",
+                    mask_bw.shape[:2],
+                    left_bgr.shape[:2],
+                )
+                mask_bw = cv2.resize(
+                    mask_bw,
+                    (left_bgr.shape[1], left_bgr.shape[0]),
+                    interpolation=cv2.INTER_NEAREST,
+                )
+            diag.yolo_selected_index = int(getattr(yolo_result, "selected_index", -1))
+            diag.mask_area_ratio = float(getattr(yolo_result, "mask_area_ratio", 0.0))
             vis_bgr = yolo_result.overlay.copy()
             phase = "STAGE2_YOLO"
 
@@ -605,8 +798,24 @@ class QuestStereoPosePipeline:
             self._depth_acc += timing.depth_ms
 
             depth_m = np.asarray(depth_m, dtype=np.float32)
+            if depth_m.shape[:2] != left_bgr.shape[:2]:
+                logging.warning(
+                    "[FFS] depth 尺寸与图像不一致 depth=%s image=%s，已线性缩放。",
+                    depth_m.shape[:2],
+                    left_bgr.shape[:2],
+                )
+                depth_m = cv2.resize(
+                    depth_m,
+                    (left_bgr.shape[1], left_bgr.shape[0]),
+                    interpolation=cv2.INTER_LINEAR,
+                )
             invalid = (depth_m < self.min_depth) | (depth_m > self.max_depth)
             depth_m[invalid] = 0.0
+            diag = self._compute_frame_diagnostics(
+                mask_bw,
+                depth_m,
+                yolo_selected_index=diag.yolo_selected_index,
+            )
             phase = "STAGE3_FFS"
 
         # 阶段4：FoundationPose 注册/跟踪。
@@ -618,28 +827,47 @@ class QuestStereoPosePipeline:
 
             if not self._has_pose:
                 has_valid_mask = det_count > 0 and np.count_nonzero(mask_bw) > 0
-                if has_valid_mask:
-                    pose_4x4 = self.pose_estimator.register(
-                        rgb=left_bgr,
-                        depth=depth_m.astype(np.float64),
-                        mask=mask_bw,
-                    )
-                    pose_4x4 = np.asarray(pose_4x4, dtype=np.float64).reshape(4, 4)
-                    self._has_pose = True
-                    vis_bgr = self.pose_estimator.visualize_pose(left_bgr, pose_4x4)
-
-                    if self.cutie_tracker is not None:
-                        ct0 = time.perf_counter()
-                        try:
-                            _ = self.cutie_tracker.initialize(
-                                left_bgr, init_mask=mask_bw
+                if has_valid_mask and diag.depth_valid_in_mask >= float(self.args.register_min_depth_valid_in_mask):
+                    try:
+                        pose_4x4 = self.pose_estimator.register(
+                            rgb=left_rgb,
+                            depth=depth_m.astype(np.float64),
+                            mask=mask_bw,
+                        )
+                        pose_4x4 = np.asarray(pose_4x4, dtype=np.float64).reshape(4, 4)
+                        if not self._is_pose_valid(pose_4x4):
+                            logging.warning("[FoundationPose] register 输出非法或 z 越界，丢弃本次结果。")
+                            pose_4x4 = None
+                            self.pose_estimator.reset()
+                            phase = "REJECT_POSE"
+                        else:
+                            self._has_pose = True
+                            self._track_reject_count = 0
+                            self._last_pose_4x4 = pose_4x4.copy()
+                            vis_bgr = cv2.cvtColor(
+                                self.pose_estimator.visualize_pose(left_rgb, pose_4x4),
+                                cv2.COLOR_RGB2BGR,
                             )
-                            self._cutie_initialized = True
-                        except Exception as exc:
-                            self._cutie_initialized = False
-                            logging.warning("[cutie] 初始化失败: %s", exc)
-                        timing.cutie_ms += (time.perf_counter() - ct0) * 1000.0
-                    phase = "REGISTER"
+
+                            if self.cutie_tracker is not None:
+                                ct0 = time.perf_counter()
+                                try:
+                                    _ = self.cutie_tracker.initialize(
+                                        left_rgb, init_mask=mask_bw
+                                    )
+                                    self._cutie_initialized = True
+                                except Exception as exc:
+                                    self._cutie_initialized = False
+                                    logging.warning("[cutie] 初始化失败: %s", exc)
+                                timing.cutie_ms += (time.perf_counter() - ct0) * 1000.0
+                            phase = "REGISTER"
+                    except Exception as exc:
+                        logging.warning("[FoundationPose] register 失败: %s", exc)
+                        pose_4x4 = None
+                        self.pose_estimator.reset()
+                        phase = "REJECT_POSE"
+                elif has_valid_mask:
+                    phase = "REJECT_DEPTH"
                 else:
                     phase = "WAIT_DETECT"
 
@@ -647,7 +875,7 @@ class QuestStereoPosePipeline:
                 if self.cutie_tracker is not None and self._cutie_initialized:
                     ct0 = time.perf_counter()
                     try:
-                        cutie_result = self.cutie_tracker.track(left_bgr)
+                        cutie_result = self.cutie_tracker.track(left_rgb)
                         cutie_bbox = cutie_result.bbox_xywh
                         cutie_mask = (cutie_result.mask > 0).astype(np.uint8) * 255
 
@@ -655,10 +883,12 @@ class QuestStereoPosePipeline:
                         if bw > 0 and bh > 0:
                             cx = float(x + bw / 2.0)
                             cy = float(y + bh / 2.0)
-                            self.pose_estimator.adjust_pose_to_image_point(cx, cy)
+                            if bool(self.args.cutie_adjust_pose):
+                                self.pose_estimator.adjust_pose_to_image_point(cx, cy)
+                                diag.cutie_adjust_applied = True
                         elif det_count > 0 and np.count_nonzero(mask_bw) > 0:
                             _ = self.cutie_tracker.initialize(
-                                left_bgr, init_mask=mask_bw
+                                left_rgb, init_mask=mask_bw
                             )
                             self._cutie_initialized = True
                     except Exception as exc:
@@ -666,14 +896,67 @@ class QuestStereoPosePipeline:
                         self._cutie_initialized = False
                     timing.cutie_ms += (time.perf_counter() - ct0) * 1000.0
 
-                pose_4x4 = self.pose_estimator.track(
-                    rgb=left_bgr,
-                    depth=depth_m.astype(np.float64),
-                )
-                pose_4x4 = np.asarray(pose_4x4, dtype=np.float64).reshape(4, 4)
-                vis_bgr = self.pose_estimator.visualize_pose(left_bgr, pose_4x4)
+                try:
+                    pose_4x4 = self.pose_estimator.track(
+                        rgb=left_rgb,
+                        depth=depth_m.astype(np.float64),
+                    )
+                    pose_4x4 = np.asarray(pose_4x4, dtype=np.float64).reshape(4, 4)
+                except Exception as exc:
+                    logging.warning("[FoundationPose] track 失败: %s", exc)
+                    pose_4x4 = None
+                    self._track_reject_count += 1
+                    self._has_pose = False
+                    self.pose_estimator.reset()
+                    phase = "REJECT_POSE"
 
-                if cutie_bbox[2] > 0 and cutie_bbox[3] > 0:
+                if pose_4x4 is not None and not self._is_pose_valid(pose_4x4):
+                    logging.warning("[FoundationPose] track 输出非法或 z 越界，重置跟踪。")
+                    pose_4x4 = None
+                    self._track_reject_count += 1
+                    self._has_pose = False
+                    self.pose_estimator.reset()
+                    phase = "REJECT_POSE"
+                elif pose_4x4 is not None and self._is_track_jump(pose_4x4):
+                    self._track_reject_count += 1
+                    logging.warning(
+                        "[FoundationPose] track pose 跳变，尝试 re-register (reject_count=%d)。",
+                        self._track_reject_count,
+                    )
+                    pose_4x4 = None
+                    self._has_pose = False
+                    self.pose_estimator.reset()
+                    phase = "REJECT_JUMP"
+                elif pose_4x4 is not None:
+                    self._track_reject_count = 0
+                    self._last_pose_4x4 = pose_4x4.copy()
+                    vis_bgr = cv2.cvtColor(
+                        self.pose_estimator.visualize_pose(left_rgb, pose_4x4),
+                        cv2.COLOR_RGB2BGR,
+                    )
+                    phase = "TRACK"
+
+                if pose_4x4 is None:
+                    recovered_pose = self._try_recover_by_register(
+                        left_rgb=left_rgb,
+                        depth_m=depth_m,
+                        mask_bw=cutie_mask if cutie_mask is not None else mask_bw,
+                        diag=self._compute_frame_diagnostics(
+                            cutie_mask if cutie_mask is not None else mask_bw,
+                            depth_m,
+                            yolo_selected_index=diag.yolo_selected_index,
+                        ),
+                        timing=timing,
+                    )
+                    if recovered_pose is not None:
+                        pose_4x4 = recovered_pose
+                        vis_bgr = cv2.cvtColor(
+                            self.pose_estimator.visualize_pose(left_rgb, pose_4x4),
+                            cv2.COLOR_RGB2BGR,
+                        )
+                        phase = "RE_REGISTER"
+
+                if pose_4x4 is not None and cutie_bbox[2] > 0 and cutie_bbox[3] > 0:
                     x, y, bw, bh = cutie_bbox
                     cv2.rectangle(
                         vis_bgr,
@@ -684,9 +967,6 @@ class QuestStereoPosePipeline:
                     )
                     if cutie_mask is not None:
                         mask_bw = cutie_mask
-
-                phase = "TRACK"
-
             timing.pose_ms = (time.perf_counter() - t2) * 1000.0
             self._pose_acc += timing.pose_ms
             self._cutie_acc += timing.cutie_ms
@@ -709,24 +989,27 @@ class QuestStereoPosePipeline:
         debug_data: PipelineDebugData | None = None
         if return_debug:
             depth_vis_bgr = _colorize_depth(depth_m, self.min_depth, self.max_depth)
+            alignment_depth_bgr = _overlay_mask_contour(depth_vis_bgr, mask_bw, (0, 255, 255))
             stereo_vis_bgr = np.hstack((left_bgr, right_bgr))
 
             _draw_hud(
                 vis_bgr,
                 [
-                    f"fps={fps:.1f} | stage={self.stage} | phase={phase}",
-                    f"det={det_count} | depth_valid={depth_valid_ratio:.1%}",
-                    f"yolo={timing.yolo_ms:.1f}ms | depth={timing.depth_ms:.1f}ms",
-                    f"cutie={timing.cutie_ms:.1f}ms | pose={timing.pose_ms:.1f}ms",
+                    f"fps={fps:.1f} stage={self.stage} {phase} det={det_count}",
+                    f"ms y/d/c/p={timing.yolo_ms:.0f}/{timing.depth_ms:.0f}/{timing.cutie_ms:.0f}/{timing.pose_ms:.0f}",
+                    f"depth={depth_valid_ratio:.0%} in_mask={diag.depth_valid_in_mask:.0%} med={diag.depth_median_in_mask:.2f}m",
+                    f"mask={diag.mask_area_ratio:.1%} reject={self._track_reject_count}",
                 ],
             )
-            _draw_hud(stereo_vis_bgr, f"timestamp={stereo_timestamp_ms:.1f}ms")
+            dashboard_bgr = _tile_debug_dashboard(
+                pose_bgr=vis_bgr,
+                depth_bgr=alignment_depth_bgr,
+            )
+            _draw_hud(stereo_vis_bgr, "STEREO", x=8, y=22)
 
             debug_data = PipelineDebugData(
-                vis_bgr=vis_bgr,
-                mask_bw=mask_bw,
-                depth_vis_bgr=depth_vis_bgr,
-                stereo_vis_bgr=stereo_vis_bgr,
+                dashboard_bgr=dashboard_bgr,
+                stereo_bgr=stereo_vis_bgr,
             )
 
         output = PosePipelineOutput(
@@ -870,7 +1153,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--yolo_max_det",
         type=int,
-        default=2,
+        default=1,
         help="YOLO 每帧最大保留检测数量。",
     )
     parser.add_argument(
@@ -1019,6 +1302,31 @@ def build_arg_parser() -> argparse.ArgumentParser:
         choices=["none", "cube"],
         help="对称约束模式。",
     )
+    parser.add_argument(
+        "--register_min_depth_valid_in_mask",
+        type=float,
+        default=0.2,
+        help="初始 register 前 mask 内有效深度比例下限；低于该值说明 mask/depth 可能未对齐。",
+    )
+    parser.add_argument(
+        "--re_register_on_track_lost",
+        type=int,
+        default=1,
+        choices=[0, 1],
+        help="FoundationPose track 失败/跳变时，是否用当前稳定 2D mask 立即重新 register。",
+    )
+    parser.add_argument(
+        "--pose_jump_translation_m",
+        type=float,
+        default=0.35,
+        help="单帧 track 平移跳变阈值（米），超过则拒绝并尝试重注册。",
+    )
+    parser.add_argument(
+        "--pose_jump_rotation_deg",
+        type=float,
+        default=80.0,
+        help="单帧 track 旋转跳变阈值（度），超过则拒绝并尝试重注册。",
+    )
 
     # 统计与 2D tracker 参数。
     parser.add_argument(
@@ -1038,6 +1346,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=5,
         help="Cutie mask 腐蚀核大小（像素）。",
+    )
+    parser.add_argument(
+        "--cutie_adjust_pose",
+        type=int,
+        default=1,
+        choices=[0, 1],
+        help="是否用 Cutie bbox 中心强制修正 FoundationPose 上一帧 tx/ty。默认关闭以避免 2D 抖动注入 6D pose。",
     )
     return parser
 
@@ -1163,9 +1478,7 @@ def run_quest_pipeline(args: argparse.Namespace) -> None:
     pipeline = build_quest_pipeline(args)
     pipeline.start()
 
-    cv2.namedWindow("Quest Pipeline", cv2.WINDOW_AUTOSIZE)
-    cv2.namedWindow("Quest Mask", cv2.WINDOW_AUTOSIZE)
-    cv2.namedWindow("Quest Depth", cv2.WINDOW_AUTOSIZE)
+    cv2.namedWindow("Quest Debug", cv2.WINDOW_AUTOSIZE)
     cv2.namedWindow("Quest Stereo", cv2.WINDOW_AUTOSIZE)
 
     try:
@@ -1177,10 +1490,8 @@ def run_quest_pipeline(args: argparse.Namespace) -> None:
                 continue
 
             if output.debug is not None:
-                cv2.imshow("Quest Pipeline", output.debug.vis_bgr)
-                cv2.imshow("Quest Mask", output.debug.mask_bw)
-                cv2.imshow("Quest Depth", output.debug.depth_vis_bgr)
-                cv2.imshow("Quest Stereo", output.debug.stereo_vis_bgr)
+                cv2.imshow("Quest Debug", output.debug.dashboard_bgr)
+                cv2.imshow("Quest Stereo", output.debug.stereo_bgr)
 
             if output.pose_4x4 is not None:
                 t = output.pose_4x4[:3, 3]
